@@ -8,7 +8,7 @@ import sys
 import decky
 
 # Our modules live in a uniquely named package: bare names like `settings` clash with Decky's own modules.
-from dns_unblock import nm, providers
+from dns_unblock import health, nm, providers
 from dns_unblock.settings import Settings
 
 # States reported to the frontend.
@@ -82,6 +82,20 @@ class Plugin:
             if self.settings.enabled:
                 await self._apply()
         return await self._emit_status()
+
+    async def run_diagnostics(self) -> dict:
+        device = self.device
+        network_dns: list[str] = []
+        try:
+            device = device or await nm.get_active_wifi_device()
+            if device:
+                network_dns = await nm.get_dhcp_dns(device)
+        except nm.CommandError as e:
+            decky.logger.warning("Diagnostics: network lookup failed: %s", e)
+        rows = await health.diagnose(network_dns)
+        decky.logger.info("Diagnostics on %s (network DNS %s): %s", device, network_dns,
+                          [(r["domain"], r["network"]["verdict"], r["system"]["verdict"]) for r in rows])
+        return {"device": device, "network_dns": network_dns, "rows": rows}
 
     # --- internals (callers hold self.lock) ---
 
