@@ -1,0 +1,11 @@
+{
+  "name": "DNS Unblock",
+  "author": "Ch1mpleo",
+  "flags": ["debug", "root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["network", "dns", "root"],
+    "description": "Bypass ISP DNS blocking on any Wi-Fi using encrypted DNS (DoH), with safe fallback to the network default.",
+    "image": "https://opengraph.githubassets.com/1/Ch1mpleo/decky-dns-unblock"
+  }
+}
