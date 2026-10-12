@@ -2,7 +2,7 @@
 # Milestone 1 on-device spike: ISP block style, runtime DNS override (nmcli device modify/reapply),
 # and dnsproxy on 127.0.0.2 behind systemd-resolved. Always restores the network's DNS on exit.
 #
-# Expects dnsproxy and dnsquery.py next to this script. Run on the Deck as root, detached from the
+# Expects dnsproxy and dnsquery.py (py_modules/dns_unblock/dnsquery.py) next to this script. Run on the Deck as root, detached from the
 # terminal so a dropped SSH session can't interrupt it halfway:
 #   sudo setsid bash m1-spike.sh; cat /tmp/m1-spike.log
 set -u

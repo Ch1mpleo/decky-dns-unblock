@@ -1,41 +1,83 @@
 import {
   ButtonItem,
+  Field,
   PanelSection,
   PanelSectionRow,
+  ToggleField,
   staticClasses
 } from "@decky/ui";
 import {
+  addEventListener,
   callable,
   definePlugin,
+  removeEventListener,
+  toaster,
 } from "@decky/api"
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FaShieldAlt } from "react-icons/fa";
 
-type PingResult = { pong: boolean; uid: number; plugin_dir: string };
+type Status = {
+  enabled: boolean;
+  mode: string;
+  provider: string;
+  custom_servers: string[];
+  state: string;
+  message: string;
+  device: string | null;
+  link_dns: string[];
+  current_dns: string | null;
+  connectivity: string;
+};
 
-const ping = callable<[], PingResult>("ping");
+const getStatus = callable<[], Status>("get_status");
+const setEnabled = callable<[enabled: boolean], Status>("set_enabled");
 
 function Content() {
-  const [result, setResult] = useState<string | undefined>();
+  const [status, setStatus] = useState<Status | undefined>();
+  const [busy, setBusy] = useState(false);
 
-  const onClick = async () => {
+  const refresh = async () => setStatus(await getStatus());
+
+  useEffect(() => {
+    refresh();
+    const listener = addEventListener<[Status]>("status", setStatus);
+    return () => { removeEventListener("status", listener); };
+  }, []);
+
+  const onToggle = async (enabled: boolean) => {
+    setBusy(true);
     try {
-      const r = await ping();
-      setResult(`Backend OK (uid ${r.uid})`);
+      setStatus(await setEnabled(enabled));
     } catch (e) {
-      setResult(`Backend error: ${e}`);
+      toaster.toast({ title: "DNS Unblock", body: `${e}` });
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
     <PanelSection title="DNS Unblock">
       <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={onClick}
-        >
-          {result ?? "Ping backend"}
-        </ButtonItem>
+        <ToggleField
+          label="Bypass DNS block"
+          checked={status?.enabled ?? false}
+          disabled={!status || busy}
+          onChange={onToggle}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <Field label="State" description={status?.message || undefined}>{status?.state ?? "..."}</Field>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <Field label="Link DNS" description={status?.current_dns ? `in use: ${status.current_dns}` : undefined}>
+          {status?.link_dns.join(", ") || "-"}
+        </Field>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <Field label="Network">{`${status?.device ?? "-"} (${status?.connectivity ?? "?"})`}</Field>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem layout="below" onClick={refresh}>Refresh</ButtonItem>
       </PanelSectionRow>
     </PanelSection>
   );

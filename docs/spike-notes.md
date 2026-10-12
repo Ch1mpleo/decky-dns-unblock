@@ -6,7 +6,7 @@ Scripts: `scripts/spike/m1-spike.sh` (root checks, always restores DNS on exit) 
 
 ## 1. ISP block style: NXDOMAIN
 
-Queried with `py_modules/dnsquery.py` straight at each server:
+Queried with `py_modules/dns_unblock/dnsquery.py` straight at each server:
 
 | Name | Router `192.168.1.1` / VNPT `123.23.23.23` | `1.1.1.1` / `8.8.8.8` (plain UDP 53) |
 |---|---|---|
