@@ -13,7 +13,10 @@ export type Status = {
   link_dns: string[];
   current_dns: string | null;
   connectivity: string;
+  proxy_running: boolean;
 };
+
+export const PROXY_ADDR = "127.0.0.2";
 
 export type Verdict = { verdict: "ok" | "blocked" | "unknown"; detail: string };
 

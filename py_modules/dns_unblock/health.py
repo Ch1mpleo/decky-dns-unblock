@@ -39,6 +39,22 @@ def classify(result: dnsquery.Result | None) -> tuple[str, str]:
     return OK, result.addresses[0]
 
 
+async def verify(server: str, timeout: float = 3.0, attempts: int = 1) -> tuple[bool, str]:
+    """Check that `server` resolves a Steam domain correctly. Only "connection refused" is retried (a proxy that
+    was just started may still be binding its port); timeouts and blocked answers fail straight away."""
+    detail = ""
+    for attempt in range(attempts):
+        if attempt:
+            await asyncio.sleep(0.3)
+        result = await dnsquery.aquery(server, STEAM_DOMAINS[0], timeout=timeout)
+        verdict, detail = classify(result)
+        if verdict == OK:
+            return True, detail
+        if "refused" not in (result.error or "").lower():
+            break
+    return False, detail
+
+
 async def diagnose(network_dns: list[str], timeout: float = 3.0) -> list[dict]:
     """For each Steam domain, compare the network's own DNS with what the Deck resolves right now."""
     async def lookup(server: str | None, domain: str) -> dict:

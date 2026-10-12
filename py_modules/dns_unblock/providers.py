@@ -59,3 +59,9 @@ def plain_servers(provider: str, custom_servers: list[str]) -> tuple[list[str], 
         return split_servers(custom_servers)
     preset = PROVIDERS[provider]
     return list(preset.v4), list(preset.v6)
+
+
+def doh_upstreams(provider: str) -> list[str]:
+    """DoH URLs for dnsproxy; custom servers are plain DNS only, so they have none."""
+    preset = PROVIDERS.get(provider)
+    return list(preset.doh) if preset else []

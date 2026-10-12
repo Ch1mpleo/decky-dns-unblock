@@ -83,9 +83,11 @@ def query(server: str, name: str, qtype: int = TYPE_A, timeout: float = 3.0, por
     try:
         with socket.socket(family, socket.SOCK_DGRAM) as sock:
             sock.settimeout(timeout)
-            sock.sendto(packet, (server, port))
+            # Connected, so a closed port fails fast with ConnectionRefusedError instead of a silent timeout.
+            sock.connect((server, port))
+            sock.send(packet)
             while True:
-                data, _ = sock.recvfrom(4096)
+                data = sock.recv(4096)
                 try:
                     result.rcode, result.addresses = parse_response(data, qid)
                     break

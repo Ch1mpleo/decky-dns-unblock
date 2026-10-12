@@ -18,7 +18,7 @@ class DecideTests(unittest.TestCase):
 
     def test_full_applies(self):
         d = run(connectivity="full")
-        self.assertEqual((d.state, d.action), (state.ACTIVE_PLAIN, state.APPLY))
+        self.assertEqual((d.state, d.action), (state.ACTIVE, state.APPLY))
 
     def test_portal_pauses_even_when_applied(self):
         d = run(connectivity="portal", applied=True, settled=True)
@@ -31,11 +31,24 @@ class DecideTests(unittest.TestCase):
 
     def test_applies_anyway_once_settled(self):
         d = run(connectivity="limited", settled=True)
-        self.assertEqual((d.state, d.action), (state.ACTIVE_PLAIN, state.APPLY))
+        self.assertEqual((d.state, d.action), (state.ACTIVE, state.APPLY))
 
     def test_flaky_check_keeps_applied_dns(self):
         d = run(connectivity="limited", applied=True)
-        self.assertEqual((d.state, d.action), (state.ACTIVE_PLAIN, state.APPLY))
+        self.assertEqual((d.state, d.action), (state.ACTIVE, state.APPLY))
+
+
+class AttemptsTests(unittest.TestCase):
+    def test_auto(self):
+        self.assertEqual(state.attempts("auto", True), [state.ENCRYPTED, state.PLAIN])
+        self.assertEqual(state.attempts("auto", False), [state.PLAIN])
+
+    def test_encrypted_only_never_uses_plain(self):
+        self.assertEqual(state.attempts("encrypted", True), [state.ENCRYPTED])
+        self.assertEqual(state.attempts("encrypted", False), [])
+
+    def test_plain_only_skips_proxy(self):
+        self.assertEqual(state.attempts("plain", True), [state.PLAIN])
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ import {
   removeEventListener,
   toaster,
 } from "@decky/api"
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { FaShieldAlt } from "react-icons/fa";
 
 import {
@@ -23,6 +23,7 @@ import {
   Mode,
   NOTIFY_STATES,
   PROVIDER_OPTIONS,
+  PROXY_ADDR,
   STATE_LABELS,
   Status,
   Verdict,
@@ -52,16 +53,37 @@ function useSticky<T>(key: string, initial: T): [T, (value: T) => void] {
 const verdictText = (v: Verdict) =>
   v.verdict === "ok" ? "OK" : v.verdict === "blocked" ? `Blocked (${v.detail})` : "?";
 
+const dnsName = (server: string) => (server === PROXY_ADDR ? "dnsproxy (DoH)" : server);
+
+function StatusTable({ status }: { status: Status }) {
+  const rows: [string, string][] = [
+    ["Wi-Fi", status.device ? `${status.device} · internet ${status.connectivity}` : "-"],
+    ["DNS", status.link_dns.map(dnsName).join(", ") || "-"],
+    ["In use", status.current_dns ? dnsName(status.current_dns) : "-"],
+  ];
+  if (status.message) rows.push(["Note", status.message]);
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", columnGap: "10px", rowGap: "2px" }}>
+      {rows.map(([label, value]) => (
+        <Fragment key={label}>
+          <span style={{ opacity: 0.6 }}>{label}</span>
+          <span style={{ overflowWrap: "anywhere" }}>{value}</span>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
 function StatusRow({ status }: { status?: Status }) {
   if (!status) return <Field label="Status">Loading...</Field>;
-  const details = [
-    status.message,
-    status.device && `${status.device}, internet: ${status.connectivity}`,
-    status.link_dns.length > 0 && `DNS: ${status.link_dns.join(", ")}`,
-    status.current_dns && `in use: ${status.current_dns}`,
-  ].filter(Boolean).join(" · ");
   return (
-    <Field label="Status" description={details || undefined} focusable highlightOnFocus>
+    <Field
+      label="Status"
+      description={<StatusTable status={status} />}
+      childrenLayout="inline"
+      focusable
+      highlightOnFocus
+    >
       {STATE_LABELS[status.state] ?? status.state}
     </Field>
   );

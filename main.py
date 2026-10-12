@@ -10,11 +10,14 @@ import decky
 
 # Our modules live in a uniquely named package: bare names like `settings` clash with Decky's own modules.
 from dns_unblock import health, nm, providers, state
+from dns_unblock.proxy import LISTEN_ADDR, Proxy
 from dns_unblock.settings import Settings
 from dns_unblock.watcher import DEVICE_DOWN, DEVICE_UP, Event, Watcher
 
 # NetworkManager emits bursts of lines per change; act once things have been quiet this long.
 DEBOUNCE_SECONDS = 2.0
+# After this many dnsproxy crashes, stop trying encrypted DNS until the next connection or settings change.
+PROXY_FAILURE_LIMIT = 3
 
 
 class Plugin:
@@ -32,10 +35,23 @@ class Plugin:
         self.settle_timer: asyncio.TimerHandle | None = None
         self.tasks: set[asyncio.Task] = set()
         self.watcher = Watcher(self._on_event, decky.logger)
+        self.proxy = Proxy(
+            binary=os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "dnsproxy"),
+            pid_path=os.path.join(decky.DECKY_PLUGIN_RUNTIME_DIR, "dnsproxy.pid"),
+            log_path=os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "dnsproxy.log"),
+            logger=decky.logger,
+            on_exit=self._on_proxy_exit,
+        )
+        self.proxy_failures = 0
+        # resolved keeps using the second link server after dnsproxy hiccups; re-applying moves it back.
+        self.force_link = False
         decky.logger.info("DNS Unblock starting (Python %s), settings %s",
                           sys.version.split()[0], self.settings.to_dict())
+        if not self.proxy.available:
+            decky.logger.warning("dnsproxy not found at %s, encrypted DNS unavailable", self.proxy.binary)
 
         async with self.lock:
+            await self.proxy.kill_stale()
             stale = self._read_marker()
             if stale:
                 decky.logger.info("Cleaning up DNS left on %s by a previous run", stale)
@@ -55,12 +71,19 @@ class Plugin:
     # --- RPC methods (called from the frontend) ---
 
     async def get_status(self) -> dict:
-        return await self._status()
+        status = await self._status()
+        if (self.state == state.ACTIVE_ENCRYPTED and status["current_dns"]
+                and status["current_dns"] != LISTEN_ADDR and not self.lock.locked()):
+            decky.logger.info("resolved switched to %s, moving it back to dnsproxy", status["current_dns"])
+            self.force_link = True
+            self._spawn_reconcile()
+        return status
 
     async def set_enabled(self, enabled: bool) -> dict:
         async with self.lock:
             self.settings.enabled = bool(enabled)
             self.settings.save()
+            self.proxy_failures = 0
             await self._reconcile()
         return await self._emit_status()
 
@@ -68,12 +91,15 @@ class Plugin:
         async with self.lock:
             self.settings.set_mode(mode)
             self.settings.save()
+            self.proxy_failures = 0
+            await self._reconcile()
         return await self._emit_status()
 
     async def set_provider(self, provider: str, custom_servers: list[str] | None = None) -> dict:
         async with self.lock:
             self.settings.set_provider(provider, custom_servers)
             self.settings.save()
+            self.proxy_failures = 0
             await self._reconcile()
         return await self._emit_status()
 
@@ -91,12 +117,13 @@ class Plugin:
                           [(r["domain"], r["network"]["verdict"], r["system"]["verdict"]) for r in rows])
         return {"device": device, "network_dns": network_dns, "rows": rows}
 
-    # --- NetworkManager events ---
+    # --- events (NetworkManager, dnsproxy) ---
 
     def _on_event(self, event: Event) -> None:
         decky.logger.info("Network event: %s %s", event.kind, event.value)
         if event.kind == DEVICE_UP:
             self.connected_at[event.value] = time.monotonic()
+            self.proxy_failures = 0
         elif event.kind == DEVICE_DOWN:
             self.connected_at.pop(event.value, None)
             # Deactivation drops runtime changes, so our DNS is gone from this device.
@@ -106,6 +133,11 @@ class Plugin:
         if self.debounce_timer:
             self.debounce_timer.cancel()
         self.debounce_timer = self.loop.call_later(DEBOUNCE_SECONDS, self._spawn_reconcile)
+
+    def _on_proxy_exit(self, code: int) -> None:
+        self.proxy_failures += 1
+        self.force_link = True
+        self._spawn_reconcile()
 
     def _spawn_reconcile(self) -> None:
         task = asyncio.create_task(self._reconcile_and_emit())
@@ -128,6 +160,7 @@ class Plugin:
         for task in list(self.tasks):
             task.cancel()
         async with self.lock:
+            await self.proxy.stop()
             device = self.device or self._read_marker()
             if device:
                 await self._restore(device)
@@ -164,12 +197,14 @@ class Plugin:
             applied=self.device is not None and self.device == device,
         )
         if decision.action == state.APPLY:
-            if not await self._apply(device):
-                return
-        elif decision.action == state.RESTORE:
+            await self._apply(device)
+            return
+        if decision.action == state.RESTORE:
+            await self.proxy.stop()
             if self.device:
                 await self._restore(self.device)
         elif decision.action == state.FORGET:
+            await self.proxy.stop()
             self._forget()
         self._set_state(decision.state, decision.message)
 
@@ -177,22 +212,79 @@ class Plugin:
             remaining = max(state.SETTLE_SECONDS - waited, 0.0) + 0.1
             self.settle_timer = self.loop.call_later(remaining, self._spawn_reconcile)
 
-    async def _apply(self, device: str) -> bool:
-        v4, v6 = providers.plain_servers(self.settings.provider, self.settings.custom_servers)
+    async def _apply(self, device: str) -> None:
+        """Try encrypted and/or plain DNS (per mode), verifying each before touching the device.
+        If nothing works, give the device back the network's own DNS."""
+        doh = providers.doh_upstreams(self.settings.provider)
+        encrypted_ok = self.proxy.available and bool(doh) and self.proxy_failures < PROXY_FAILURE_LIMIT
+        steps = state.attempts(self.settings.mode, encrypted_ok)
+        notes: list[str] = []
+        if not encrypted_ok and self.settings.mode != state.PLAIN:
+            notes.append(self._encrypted_unavailable_reason(doh))
+
+        for step in steps:
+            try:
+                if step == state.ENCRYPTED:
+                    ok, detail = await self._try_encrypted(device, doh)
+                else:
+                    ok, detail = await self._try_plain(device)
+            except nm.CommandError as e:
+                decky.logger.error("Applying DNS on %s failed: %s", device, e)
+                await self.proxy.stop()
+                await self._restore(device)
+                self._set_state(state.ERROR, str(e))
+                return
+            if ok:
+                self._set_state(state.ACTIVE_STATES[step], "; ".join(notes))
+                return
+            decky.logger.warning("%s DNS check failed on %s: %s", step.capitalize(), device, detail)
+            notes.append(f"{step.capitalize()} DNS failed ({detail})")
+
+        await self.proxy.stop()
+        if self.device:
+            await self._restore(self.device)
+        self._set_state(state.FALLBACK, "; ".join(notes) or "No usable DNS")
+
+    def _encrypted_unavailable_reason(self, doh: list[str]) -> str:
+        if not doh:
+            return "Custom servers have no encrypted DNS"
+        if not self.proxy.available:
+            return "dnsproxy is missing"
+        return "dnsproxy keeps crashing"
+
+    async def _try_encrypted(self, device: str, doh: list[str]) -> tuple[bool, str]:
         try:
-            link_dns, _ = await nm.get_link_dns(device)
-            if not nm.dns_matches(link_dns, v4, v6):
-                await nm.apply_dns(device, v4, v6)
-                decky.logger.info("Plain DNS applied on %s: %s %s (was %s)", device, v4, v6, link_dns)
-        except nm.CommandError as e:
-            decky.logger.error("Applying DNS on %s failed: %s", device, e)
-            await self._restore(device)
-            self._set_state(state.ERROR, str(e))
-            return False
+            started = await self.proxy.start(doh)
+        except OSError as e:
+            return False, f"dnsproxy: {e}"
+        ok, detail = await health.verify(LISTEN_ADDR, timeout=4.0, attempts=5)
+        if not ok:
+            await self.proxy.stop()
+            return False, detail
+        v4, _ = providers.plain_servers(self.settings.provider, self.settings.custom_servers)
+        # Auto keeps a plain server second so resolved still has DNS if dnsproxy dies.
+        link = [LISTEN_ADDR] + (v4[:1] if self.settings.mode == "auto" else [])
+        await self._set_link(device, link, [], force=started or self.force_link)
+        self.force_link = False
+        return True, detail
+
+    async def _try_plain(self, device: str) -> tuple[bool, str]:
+        v4, v6 = providers.plain_servers(self.settings.provider, self.settings.custom_servers)
+        ok, detail = await health.verify((v4 or v6)[0], timeout=3.0)
+        if not ok:
+            return False, detail
+        await self.proxy.stop()
+        await self._set_link(device, v4, v6)
+        return True, detail
+
+    async def _set_link(self, device: str, v4: list[str], v6: list[str], force: bool = False) -> None:
+        link_dns, _ = await nm.get_link_dns(device)
+        if force or not nm.dns_matches(link_dns, v4, v6):
+            await nm.apply_dns(device, v4, v6)
+            decky.logger.info("DNS on %s set to %s %s (was %s)", device, v4, v6, link_dns)
         if self.device != device:
             self.device = device
             self._write_marker(device)
-        return True
 
     async def _restore(self, device: str) -> None:
         try:
@@ -223,6 +315,7 @@ class Plugin:
             "link_dns": [],
             "current_dns": None,
             "connectivity": "unknown",
+            "proxy_running": self.proxy.running,
         }
         try:
             status["connectivity"] = await nm.get_connectivity()
