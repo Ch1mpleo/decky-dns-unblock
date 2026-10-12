@@ -45,6 +45,10 @@ class Plugin:
         self.proxy_failures = 0
         # resolved keeps using the second link server after dnsproxy hiccups; re-applying moves it back.
         self.force_link = False
+        # After a reconnect dnsproxy's pooled HTTPS connections are dead (requests hang until its timeout) and its
+        # cache would hide that from verify, so it is restarted before the next use.
+        self.proxy_stale = False
+        self.stopping = False
         decky.logger.info("DNS Unblock starting (Python %s), settings %s",
                           sys.version.split()[0], self.settings.to_dict())
         if not self.proxy.available:
@@ -58,7 +62,9 @@ class Plugin:
                 await self._restore(stale)
             await self._reconcile()
         await self._emit_status()
-        self.watcher.start()
+        # Decky can unload a plugin while _main is still running (seen during deploys).
+        if not self.stopping:
+            self.watcher.start()
 
     async def _unload(self):
         decky.logger.info("DNS Unblock unloading")
@@ -113,9 +119,12 @@ class Plugin:
         except nm.CommandError as e:
             decky.logger.warning("Diagnostics: network lookup failed: %s", e)
         rows = await health.diagnose(network_dns)
-        decky.logger.info("Diagnostics on %s (network DNS %s): %s", device, network_dns,
-                          [(r["domain"], r["network"]["verdict"], r["system"]["verdict"]) for r in rows])
-        return {"device": device, "network_dns": network_dns, "rows": rows}
+        summary = health.summarize(rows)
+        decky.logger.info("Diagnostics on %s (network DNS %s, state %s, dnsproxy %s): %s -> %s",
+                          device, network_dns, self.state, self.proxy.running,
+                          [(r["domain"], r["network"]["verdict"], r["doh"]["verdict"], r["system"]["verdict"])
+                           for r in rows], summary)
+        return {"device": device, "network_dns": network_dns, "rows": rows, "summary": summary}
 
     # --- events (NetworkManager, dnsproxy) ---
 
@@ -126,6 +135,7 @@ class Plugin:
             self.proxy_failures = 0
         elif event.kind == DEVICE_DOWN:
             self.connected_at.pop(event.value, None)
+            self.proxy_stale = True
             # Deactivation drops runtime changes, so our DNS is gone from this device.
             if self.device == event.value:
                 self.device = None
@@ -153,6 +163,7 @@ class Plugin:
             decky.logger.exception("Reconcile failed")
 
     async def _shutdown(self) -> None:
+        self.stopping = True
         for timer in (self.debounce_timer, self.settle_timer):
             if timer:
                 timer.cancel()
@@ -253,6 +264,9 @@ class Plugin:
         return "dnsproxy keeps crashing"
 
     async def _try_encrypted(self, device: str, doh: list[str]) -> tuple[bool, str]:
+        if self.proxy_stale:
+            await self.proxy.stop()
+            self.proxy_stale = False
         try:
             started = await self.proxy.start(doh)
         except OSError as e:

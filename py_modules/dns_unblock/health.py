@@ -12,6 +12,9 @@ STEAM_DOMAINS = (
     "login.steampowered.com",
 )
 SYSTEM_RESOLVER = "127.0.0.53"
+# Reference for "does encrypted DNS work from this network". Fixed rather than the chosen provider because
+# urllib only speaks HTTP/1.1 and Quad9's DoH on port 443 requires HTTP/2.
+REFERENCE_DOH = "https://1.1.1.1/dns-query"
 
 OK = "ok"
 BLOCKED = "blocked"
@@ -56,17 +59,41 @@ async def verify(server: str, timeout: float = 3.0, attempts: int = 1) -> tuple[
 
 
 async def diagnose(network_dns: list[str], timeout: float = 3.0) -> list[dict]:
-    """For each Steam domain, compare the network's own DNS with what the Deck resolves right now."""
-    async def lookup(server: str | None, domain: str) -> dict:
-        result = await dnsquery.aquery(server, domain, timeout=timeout) if server else None
-        verdict, detail = classify(result)
-        return {"verdict": verdict, "detail": detail}
+    """For each Steam domain, compare the network's own DNS, encrypted DNS (DoH) and what the Deck resolves now."""
+    def verdict(result: dnsquery.Result | None) -> dict:
+        v, detail = classify(result)
+        return {"verdict": v, "detail": detail}
+
+    async def plain(server: str | None, domain: str) -> dict:
+        return verdict(await dnsquery.aquery(server, domain, timeout=timeout) if server else None)
+
+    async def doh(domain: str) -> dict:
+        return verdict(await dnsquery.adoh_query(REFERENCE_DOH, domain, timeout=timeout + 1))
 
     network_server = network_dns[0] if network_dns else None
     rows = await asyncio.gather(*(
-        asyncio.gather(lookup(network_server, d), lookup(SYSTEM_RESOLVER, d)) for d in STEAM_DOMAINS
+        asyncio.gather(plain(network_server, d), doh(d), plain(SYSTEM_RESOLVER, d)) for d in STEAM_DOMAINS
     ))
     return [
-        {"domain": domain, "network": network, "system": system}
-        for domain, (network, system) in zip(STEAM_DOMAINS, rows)
+        {"domain": domain, "network": network, "doh": doh_result, "system": system}
+        for domain, (network, doh_result, system) in zip(STEAM_DOMAINS, rows)
     ]
+
+
+def summarize(rows: list[dict]) -> str:
+    """One or two plain sentences explaining the diagnostics table."""
+    def first_blocked(column: str) -> str | None:
+        return next((r[column]["detail"] for r in rows if r[column]["verdict"] == BLOCKED), None)
+
+    parts = []
+    network = first_blocked("network")
+    if network:
+        parts.append(f"Your network's DNS blocks Steam ({network}).")
+    elif all(r["network"]["verdict"] == OK for r in rows):
+        parts.append("Your network's DNS doesn't block Steam.")
+    doh = first_blocked("doh")
+    if doh:
+        parts.append(f"Encrypted DNS can't get through on this network ({doh}).")
+    system = first_blocked("system")
+    parts.append(f"The Deck can't resolve Steam ({system})." if system else "The Deck resolves Steam correctly.")
+    return " ".join(parts)

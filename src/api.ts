@@ -23,7 +23,8 @@ export type Verdict = { verdict: "ok" | "blocked" | "unknown"; detail: string };
 export type Diagnostics = {
   device: string | null;
   network_dns: string[];
-  rows: { domain: string; network: Verdict; system: Verdict }[];
+  rows: { domain: string; network: Verdict; doh: Verdict; system: Verdict }[];
+  summary: string;
 };
 
 export const getStatus = callable<[], Status>("get_status");

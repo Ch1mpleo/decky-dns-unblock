@@ -26,5 +26,32 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(health.classify(None)[0], health.UNKNOWN)
 
 
+def row(network, doh, system, detail="NXDOMAIN"):
+    v = lambda verdict: {"verdict": verdict, "detail": detail if verdict == health.BLOCKED else "1.2.3.4"}
+    return {"domain": "store.steampowered.com", "network": v(network), "doh": v(doh), "system": v(system)}
+
+
+class SummaryTests(unittest.TestCase):
+    def test_blocked_network_fixed_by_deck(self):
+        self.assertEqual(health.summarize([row(health.BLOCKED, health.OK, health.OK)]),
+                         "Your network's DNS blocks Steam (NXDOMAIN). The Deck resolves Steam correctly.")
+
+    def test_doh_blocked(self):
+        text = health.summarize([row(health.OK, health.BLOCKED, health.OK, detail="timeout")])
+        self.assertIn("doesn't block Steam", text)
+        self.assertIn("Encrypted DNS can't get through on this network (timeout)", text)
+
+    def test_unknown_network_not_mentioned(self):
+        text = health.summarize([row(health.UNKNOWN, health.OK, health.BLOCKED)])
+        self.assertEqual(text, "The Deck can't resolve Steam (NXDOMAIN).")
+
+
+class DohUrlTests(unittest.TestCase):
+    def test_rfc8484_get(self):
+        url = dnsquery.doh_url("https://1.1.1.1/dns-query", "example.com")
+        # ID 0, RD set, base64url without padding (RFC 8484 section 4.1).
+        self.assertEqual(url, "https://1.1.1.1/dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE")
+
+
 if __name__ == "__main__":
     unittest.main()

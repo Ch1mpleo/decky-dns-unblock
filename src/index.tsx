@@ -50,8 +50,48 @@ function useSticky<T>(key: string, initial: T): [T, (value: T) => void] {
   return [value, set];
 }
 
-const verdictText = (v: Verdict) =>
-  v.verdict === "ok" ? "OK" : v.verdict === "blocked" ? `Blocked (${v.detail})` : "?";
+const VERDICT_STYLE: Record<Verdict["verdict"], [string, string]> = {
+  ok: ["OK", "#59bf40"],
+  blocked: ["Blocked", "#ff6b6b"],
+  unknown: ["-", "inherit"],
+};
+
+// store.steampowered.com -> store, steamcommunity.com -> community
+const shortDomain = (domain: string) => domain.split(".")[0].replace(/^steam/, "");
+
+const CELL: React.CSSProperties = { padding: "4px 6px", textAlign: "left" };
+const DIVIDER = "1px solid rgba(255, 255, 255, 0.1)";
+
+function DiagnosticsTable({ rows }: { rows: Diagnostics["rows"] }) {
+  const verdictCell = (v: Verdict) => {
+    const [text, color] = VERDICT_STYLE[v.verdict];
+    return <td style={{ ...CELL, color, fontWeight: 600 }}>{text}</td>;
+  };
+  return (
+    <div style={{ width: "100%" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+        <thead>
+          <tr style={{ opacity: 0.6 }}>
+            {["Domain", "Network", "DoH", "Deck"].map((h) => <th key={h} style={{ ...CELL, fontWeight: 400 }}>{h}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.domain} style={{ borderTop: DIVIDER }}>
+              <td style={CELL}>{shortDomain(row.domain)}</td>
+              {verdictCell(row.network)}
+              {verdictCell(row.doh)}
+              {verdictCell(row.system)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ fontSize: "11px", opacity: 0.6, marginTop: "6px", lineHeight: 1.4 }}>
+        Network: this Wi-Fi's DNS · DoH: encrypted DNS (Cloudflare) · Deck: what the Deck uses now
+      </div>
+    </div>
+  );
+}
 
 const dnsName = (server: string) => (server === PROXY_ADDR ? "dnsproxy (DoH)" : server);
 
@@ -112,22 +152,31 @@ function DiagnosticsSection() {
         </ButtonItem>
       </PanelSectionRow>
       {result && (
-        <PanelSectionRow>
-          <Field label="Network DNS" description={result.device ?? undefined} focusable highlightOnFocus>
-            {result.network_dns.join(", ") || "-"}
-          </Field>
-        </PanelSectionRow>
+        <>
+          <PanelSectionRow>
+            <Field label="Result" description={result.summary} focusable highlightOnFocus />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <Field
+              label="Network DNS"
+              description={result.network_dns.join(", ") || "None from DHCP"}
+              focusable
+              highlightOnFocus
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <Field
+              label="Steam lookups"
+              childrenLayout="below"
+              childrenContainerWidth="max"
+              focusable
+              highlightOnFocus
+            >
+              <DiagnosticsTable rows={result.rows} />
+            </Field>
+          </PanelSectionRow>
+        </>
       )}
-      {result?.rows.map((row) => (
-        <PanelSectionRow key={row.domain}>
-          <Field
-            label={row.domain}
-            description={`Network: ${verdictText(row.network)} · Deck: ${verdictText(row.system)}`}
-            focusable
-            highlightOnFocus
-          />
-        </PanelSectionRow>
-      ))}
     </PanelSection>
   );
 }

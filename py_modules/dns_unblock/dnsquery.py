@@ -1,13 +1,20 @@
-"""Minimal stdlib-only DNS client (UDP, A/AAAA), so the backend needs no pip packages on the Deck."""
+"""Minimal stdlib-only DNS client (UDP and DoH, A/AAAA), so the backend needs no pip packages on the Deck."""
 
 import asyncio
+import base64
 import ipaddress
 import json
 import os
 import socket
+import ssl
 import struct
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field
+
+# Decky's bundled Python may not find the system CA store on its own.
+SYSTEM_CA_FILE = "/etc/ssl/certs/ca-certificates.crt"
 
 TYPE_A = 1
 TYPE_AAAA = 28
@@ -105,8 +112,43 @@ async def aquery(server: str, name: str, qtype: int = TYPE_A, timeout: float = 3
     return await asyncio.to_thread(query, server, name, qtype, timeout, port)
 
 
+def doh_url(url: str, name: str, qtype: int = TYPE_A) -> str:
+    """RFC 8484 GET URL. ID 0 as the RFC recommends, base64url without padding."""
+    packet = base64.urlsafe_b64encode(build_query(name, qtype, 0)).rstrip(b"=").decode()
+    return f"{url}?dns={packet}"
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    context = ssl.create_default_context(cafile=SYSTEM_CA_FILE if os.path.isfile(SYSTEM_CA_FILE) else None)
+    # No proxies: the point is to test the direct path from this network.
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
+
+
+def doh_query(url: str, name: str, qtype: int = TYPE_A, timeout: float = 4.0) -> Result:
+    result = Result(server=url, name=name)
+    request = urllib.request.Request(doh_url(url, name, qtype), headers={"accept": "application/dns-message"})
+    try:
+        with _opener().open(request, timeout=timeout) as response:
+            result.rcode, result.addresses = parse_response(response.read(65535), 0)
+    except urllib.error.HTTPError as e:
+        result.error = f"HTTP {e.code}"
+    except urllib.error.URLError as e:
+        reason = e.reason
+        result.error = "timeout" if isinstance(reason, (socket.timeout, TimeoutError)) else str(reason)
+    except (socket.timeout, TimeoutError):
+        result.error = "timeout"
+    except (OSError, ValueError, struct.error) as e:
+        result.error = str(e) or type(e).__name__
+    return result
+
+
+async def adoh_query(url: str, name: str, qtype: int = TYPE_A, timeout: float = 4.0) -> Result:
+    return await asyncio.to_thread(doh_query, url, name, qtype, timeout)
+
+
 if __name__ == "__main__":
-    # Usage: python3 dnsquery.py <server> <name> [A|AAAA]
+    # Usage: python3 dnsquery.py <server IP or https:// DoH URL> <name> [A|AAAA]
     srv, host = sys.argv[1], sys.argv[2]
     qt = TYPES[sys.argv[3].upper()] if len(sys.argv) > 3 else TYPE_A
-    print(json.dumps(query(srv, host, qt).to_dict()))
+    res = doh_query(srv, host, qt) if srv.startswith("https://") else query(srv, host, qt)
+    print(json.dumps(res.to_dict()))
