@@ -20,7 +20,7 @@ class CommandError(Exception):
     pass
 
 
-def _env() -> dict[str, str]:
+def command_env() -> dict[str, str]:
     env = dict(os.environ)
     # Decky's PyInstaller runtime points LD_LIBRARY_PATH at its bundled libs, which can break system binaries.
     original = env.pop("LD_LIBRARY_PATH_ORIG", None)
@@ -36,7 +36,7 @@ def _env() -> dict[str, str]:
 async def run(*args: str, timeout: float = DEFAULT_TIMEOUT) -> tuple[int, str, str]:
     try:
         proc = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=_env()
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=command_env()
         )
     except OSError as e:
         raise CommandError(f"{args[0]}: {e}") from e
@@ -101,6 +101,16 @@ def parse_current_dns(text: str) -> str | None:
     """Parse `resolvectl status <dev>` for the server resolved is using right now."""
     m = re.search(r"Current DNS Server:\s*(\S+)", text)
     return m.group(1).split("#", 1)[0] if m else None
+
+
+def dns_matches(link_dns: list[str], v4: list[str], v6: list[str]) -> bool:
+    """Whether the link already uses exactly our servers.
+
+    resolved only gets the IPv6 servers when the network has IPv6, so IPv4 alone also counts.
+    """
+    if not link_dns:
+        return False
+    return set(link_dns) in (set(v4) | set(v6), set(v4))
 
 
 # --- commands ---

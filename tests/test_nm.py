@@ -42,6 +42,14 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(nm.parse_current_dns(STATUS), "1.1.1.1")
         self.assertIsNone(nm.parse_current_dns("Link 3 (wlan0)\n"))
 
+    def test_dns_matches(self):
+        v4, v6 = ["1.1.1.1", "1.0.0.1"], ["2606:4700:4700::1111"]
+        self.assertTrue(nm.dns_matches(["1.1.1.1", "1.0.0.1"], v4, v6))
+        self.assertTrue(nm.dns_matches(["1.1.1.1", "2606:4700:4700::1111", "1.0.0.1"], v4, v6))
+        self.assertFalse(nm.dns_matches(["192.168.1.1", "123.23.23.23"], v4, v6))
+        self.assertFalse(nm.dns_matches(["1.1.1.1", "1.0.0.1", "192.168.1.1"], v4, v6))
+        self.assertFalse(nm.dns_matches([], [], []))
+
 
 if __name__ == "__main__":
     unittest.main()
