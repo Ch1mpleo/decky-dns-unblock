@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match package.json version
+        run: |
+          version=$(jq -r .version package.json)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $version" >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Backend tests
+        run: python -m unittest discover -s tests -t .
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+
+      - name: Fetch pinned dnsproxy
+        run: bash scripts/fetch-dnsproxy.sh
+
+      # Decky expects the zip to hold one folder named after the plugin.
+      - name: Package
+        run: |
+          name=$(jq -r .name package.json)
+          out="build/$name"
+          mkdir -p "$out"
+          cp -r dist main.py py_modules bin plugin.json package.json LICENSE THIRD_PARTY.md README.md "$out/"
+          find "$out" -name __pycache__ -type d -prune -exec rm -rf {} +
+          chmod 755 "$out/bin/dnsproxy"
+          (cd build && zip -r "$name.zip" "$name")
+          echo "ZIP=build/$name.zip" >> "$GITHUB_ENV"
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          awk -v v="$version" '
+            /^## / { if (found) exit; if (index($0, "## [" v "]") == 1) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "No CHANGELOG.md section for $version" >&2; exit 1; fi
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$ZIP" --title "DNS Unblock $GITHUB_REF_NAME" --notes-file notes.md

@@ -1,13 +1,13 @@
 {
   "name": "decky-dns-unblock",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Decky Loader plugin that bypasses ISP DNS blocking on the Steam Deck using encrypted DNS (DoH) with safe fallbacks",
   "type": "module",
   "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "rollup -c",
     "watch": "rollup -c -w",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "python -m unittest discover -s tests -t ."
   },
   "repository": {
     "type": "git",

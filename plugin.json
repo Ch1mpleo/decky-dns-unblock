@@ -1,7 +1,7 @@
 {
   "name": "DNS Unblock",
   "author": "Ch1mpleo",
-  "flags": ["debug", "root"],
+  "flags": ["root"],
   "api_version": 1,
   "publish": {
     "tags": ["network", "dns", "root"],

@@ -1,11 +1,13 @@
 <#
 .SYNOPSIS
 Download the pinned AdGuard dnsproxy Linux build into bin/ and verify its checksum.
+The version and checksum live in scripts/dnsproxy.pin (shared with fetch-dnsproxy.sh used by CI).
 #>
 $ErrorActionPreference = 'Stop'
 
-$Version = 'v0.86.0'
-$Sha256 = '17ac43f76ebfcedf547c663f6f31aa70e68b8eb6fc41d2fc37d3bfe21a2ced66'
+$pin = Get-Content (Join-Path $PSScriptRoot 'dnsproxy.pin') -Raw | ConvertFrom-StringData
+$Version = $pin.version
+$Sha256 = $pin.sha256
 $Asset = "dnsproxy-linux-amd64-$Version.tar.gz"
 $Url = "https://github.com/AdguardTeam/dnsproxy/releases/download/$Version/$Asset"
 
