@@ -17,11 +17,14 @@ if (-not (Test-Path "$key.pub")) {
     ssh-keygen -t ed25519 -f $key
 }
 
-# PowerShell pipes add CRLF line endings, so strip \r on the Deck side.
-$remote = "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; tr -d '\r' > ~/.ssh/.newkey; " +
+# The key goes in the command as base64 rather than through stdin: piping into ssh on Windows
+# breaks its password prompt, and base64 needs no quoting.
+$pub = (Get-Content "$key.pub" -Raw).Trim()
+$b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$pub`n"))
+$remote = "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; echo $b64 | base64 -d > ~/.ssh/.newkey; " +
           "grep -qxFf ~/.ssh/.newkey ~/.ssh/authorized_keys || cat ~/.ssh/.newkey >> ~/.ssh/authorized_keys; " +
           "rm -f ~/.ssh/.newkey"
-Get-Content "$key.pub" | ssh "$DeckUser@$DeckHost" $remote
+ssh "$DeckUser@$DeckHost" $remote
 if ($LASTEXITCODE) { throw 'Copying the key failed' }
 
 ssh -o BatchMode=yes "$DeckUser@$DeckHost" 'echo Key login OK'

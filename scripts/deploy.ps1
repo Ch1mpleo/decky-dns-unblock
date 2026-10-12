@@ -51,7 +51,7 @@ try {
         "sudo tar -xzf /tmp/$name.tar.gz -C $pluginDir --no-same-owner"
         # Windows tar stores everything as world-writable; the backend runs as root.
         "sudo chmod -R u=rwX,go=rX $pluginDir"
-        "if [ -d $pluginDir/bin ]; then sudo chmod 755 $pluginDir/bin/*; fi"
+        "if [ -f $pluginDir/bin/dnsproxy ]; then sudo chmod 755 $pluginDir/bin/dnsproxy; fi"
         "rm -f /tmp/$name.tar.gz"
         'sudo systemctl restart plugin_loader'
         "echo Deployed to $pluginDir"
