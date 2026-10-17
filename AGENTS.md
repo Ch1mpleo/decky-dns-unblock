@@ -33,8 +33,9 @@ guarantees. Check current code before assuming a proposed feature has shipped.
 - `py_modules/dns_unblock/proxy.py`: bundled dnsproxy process lifecycle.
 - `py_modules/dns_unblock/watcher.py`: network events, debounce inputs,
   and monitor restart behavior.
-- `py_modules/dns_unblock/health.py` and `dnsquery.py`: verification,
-  diagnostics, DNS packets, and direct DoH requests.
+- `py_modules/dns_unblock/health.py`, `httpscheck.py`, and `dnsquery.py`:
+  DNS/HTTPS verification, diagnostics (Network/Provider/Deck/HTTPS), and
+  DNS packets.
 - `py_modules/dns_unblock/providers.py` and `settings.py`: provider presets,
   validation, defaults, and persistent settings.
 - `src/index.tsx`: Quick Access panel, controls, diagnostics, and notifications.

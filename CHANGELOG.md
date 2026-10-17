@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.2.0] - 2026-10-18
+
+Reliability release: Automatic provider selection with DNS + HTTPS checks, safer restore,
+honest diagnostics, and clearer status.
+
+### Features
+
+- **Provider Automatic** (default on new installs): try Cloudflare → Google → Quad9 (then plain
+  backups in Auto mode). Saved 0.1.0 providers (e.g. Cloudflare) are **not** remapped on upgrade.
+- Selection verifies **Steam DNS and HTTPS** (SNI/Host) before committing a provider. DNS-only
+  success can stay applied with “Steam unverified”; full failure falls back to network DNS.
+- Status shows the active provider and transport (e.g. `Active · Google · Encrypted`).
+- Diagnostics columns: **Network / Provider / Deck / HTTPS** against the active or configured
+  resolver (not a fixed Cloudflare DoH probe). Sticky results clear when mode/provider/device changes.
+
+### Fixes
+
+- Restore marker cleared only after a successful restore; unload retries restore before stopping
+  dnsproxy; startup restores before killing a leftover proxy the link may still need.
+- Generation guards discard stale apply/diagnostics work after reconnect or settings changes.
+- Two-failure hysteresis before replacing an established provider; 60 s health reuse on panel open.
+- Probe dnsproxy on ports 15353–15355 for selection/diagnostics without touching live link DNS.
+- Plain mode tests each server independently and applies only verified addresses.
+- Auto mode still keeps a plain provider IP as link backup behind dnsproxy.
+
+### Tests / CI
+
+- Plugin lifecycle tests for Automatic failover, fallback, diagnostics cancel, shutdown restore.
+- Release workflow runs the same TypeScript check as CI before packaging.
+
+### Field notes
+
+- VNPT / Viettel behaviour from 0.1.0 still applies as a baseline.
+- **FPT is not claimed fixed** without affected-user Steam confirmation on that ISP.
+  Compare Automatic vs Cloudflare vs Google on the same link (see `docs/field-test.md`).
+
 ## [0.1.0] - 2026-10-13
 
 First release.

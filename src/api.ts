@@ -87,13 +87,13 @@ export const STATE_LABELS: Record<string, string> = {
 export const NOTIFY_STATES = ["paused", "fallback", "error"];
 
 export const MODE_OPTIONS: { data: Mode; label: string }[] = [
-  { data: "auto", label: "Auto (encrypted, then plain)" },
+  { data: "auto", label: "Auto" },
   { data: "encrypted", label: "Encrypted only" },
   { data: "plain", label: "Plain only" },
 ];
 
 export const PROVIDER_OPTIONS = [
-  { data: "automatic", label: "Automatic (recommended)" },
+  { data: "automatic", label: "Automatic" },
   { data: "cloudflare", label: "Cloudflare" },
   { data: "google", label: "Google" },
   { data: "quad9", label: "Quad9" },
@@ -114,16 +114,14 @@ const SHORT_PROVIDER: Record<string, string> = {
 const transportName = (t: ObservedTransport) =>
   t === "encrypted" ? "Encrypted" : t === "plain" ? "Plain" : t === "network" ? "Network DNS" : "—";
 
-/** Concise status, e.g. "Active · Google · Encrypted". */
+/** Concise status, e.g. "Active · Google · Encrypted". Extra detail stays in Note. */
 export const statusLabel = (status: Status) => {
   if (status.state === "active_encrypted" || status.state === "active_plain") {
     const active = status.active_provider ?? status.provider;
     const transport = status.observed_transport
       ?? (status.state === "active_encrypted" ? "encrypted" : "plain");
     const name = SHORT_PROVIDER[active] ?? labelOf(PROVIDER_OPTIONS, active);
-    let label = `Active · ${name} · ${transportName(transport)}`;
-    if (status.verification === "dns_only") label += " (Steam unverified)";
-    return label;
+    return `Active · ${name} · ${transportName(transport)}`;
   }
   return STATE_LABELS[status.state] ?? status.state;
 };

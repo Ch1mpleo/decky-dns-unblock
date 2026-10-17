@@ -36,23 +36,26 @@ The plugin runs as root: it changes network settings and runs a local DNS server
 | Control | What it does |
 |---|---|
 | Bypass Steam block | Master switch. |
-| Mode | **Auto** (default): encrypted DNS, plain DNS if that fails, network DNS if both fail. **Encrypted only**: never sends DNS unencrypted; falls back to network DNS instead of plain. **Plain only**: public DNS without dnsproxy. Mode Auto is transport fallback, not provider picking. |
-| Provider | **Automatic** (default on new installs): try Cloudflare, Google, then Quad9. Or pick Cloudflare, Google, Quad9, or Custom. Custom servers are plain DNS only (no encrypted DNS). Existing installs keep their saved provider. |
-| Run diagnostics | Checks Steam's domains and explains what's blocked (see below). |
+| Mode | **Auto** (default): try encrypted DNS, then plain DNS, then network DNS. **Encrypted only**: encrypted candidates only; on failure restores network DNS (not a permanent “never plaintext” guarantee). **Plain only**: public DNS without dnsproxy. Mode Auto is **transport** fallback — it is not the same as Provider Automatic. |
+| Provider | **Automatic** (default on new installs): try Cloudflare → Google → Quad9 (with DNS + HTTPS checks). Or pick one provider, or Custom (plain DNS only). Upgrading from 0.1.0 keeps a saved provider (e.g. Cloudflare is not remapped). |
+| Run diagnostics | Per-domain Network / Provider / Deck DNS plus HTTPS to Steam (see below). |
 
 ### Status
 
+When active, the label is concise: **Active · Provider · Transport** (e.g. `Active · Google · Encrypted`).
+`(Steam unverified)` means DNS worked but HTTPS to Steam did not fully confirm.
+
 | Status | Meaning |
 |---|---|
-| Active - Encrypted | DNS goes through dnsproxy over HTTPS. "In use: dnsproxy (DoH)". |
-| Active - Plain | Public DNS (e.g. 1.1.1.1) without encryption. The Note says why (encrypted DNS failed, custom servers, ...). |
+| Active · … · Encrypted | DNS goes through dnsproxy (DoH). In Auto mode the link usually also keeps a plain provider IP as backup. |
+| Active · … · Plain | Public DNS without encryption. Message may explain why (encrypted failed, custom servers, …). |
 | Waiting for network | Just connected; waiting up to 10 s for the Deck's internet check before applying. |
-| Paused - Wi-Fi login | A sign-in page was detected. The network's DNS is used so the login page loads; DNS Unblock resumes after you log in. |
-| Fallback - network DNS | Neither encrypted nor plain DNS worked here, so the network's own DNS is used (internet keeps working, blocked sites stay blocked). |
-| No Wi-Fi connected / Off / Error | As it says. Errors are also shown as a toast. |
+| Paused - Wi-Fi login | A sign-in page was detected. Network DNS is restored so the login page loads; resumes after login. |
+| Fallback - network DNS | No verified provider worked here; network DNS is restored (internet may work; blocked names can stay blocked). |
+| No Wi-Fi connected / Off / Error | As it says. Errors also toast when the panel is closed. |
 
-Under the status a small table shows the Wi-Fi device and internet check result, the DNS servers set on the link,
-and the server actually in use. Paused, Fallback and Error also pop up as toasts when the panel is closed.
+The panel table shows device, connectivity, link DNS, and the resolver in use. A successful DNS lookup does **not**
+prove Steam works; open the store/community to confirm.
 
 ### Diagnostics
 
@@ -60,13 +63,14 @@ For `store.steampowered.com`, `steamcommunity.com`, `api.steampowered.com` and `
 
 | Column | Asks |
 |---|---|
-| Network | the Wi-Fi's own DNS (from DHCP) - shows whether this network blocks Steam |
-| DoH | Cloudflare over HTTPS, directly - shows whether encrypted DNS can get through on this network |
-| Deck | the Deck's resolver right now - shows whether the fix is working |
+| Network | Wi-Fi DHCP DNS — whether this network’s resolver fails Steam names |
+| Provider | Active provider if running; otherwise the configured preference (Automatic may probe candidates without applying) |
+| Deck | systemd-resolved (`127.0.0.53`) — whether the Deck path resolves Steam |
+| HTTPS | TLS to Steam using provider-resolved addresses (SNI/Host) — DNS OK ≠ Steam reachable |
 
-Answers that are `NXDOMAIN`, `SERVFAIL`, a timeout, empty, or a sinkhole address (`0.0.0.0`, `127.x`, private IPs)
-count as Blocked. A one-line summary explains the result, e.g. "Your network's DNS blocks Steam (NXDOMAIN). The
-Deck resolves Steam correctly."
+Summaries use measured phrases (DNS resolved / lookup failed / possible DNS blocking / HTTPS reachable /
+access unverified). “Blocking” is only suggested when comparative evidence supports it (e.g. network NXDOMAIN
+while the provider resolves). Sticky diagnostics clear when mode, provider, active provider, or device changes.
 
 ## How it behaves on different networks
 
@@ -80,15 +84,17 @@ server actually resolves Steam, and only changes the link when the servers diffe
 Tested on VNPT home fiber: the router hands out `192.168.1.1` and `123.23.23.23`, which answer `NXDOMAIN` for
 Steam's domains and Reddit. Plain DNS to public resolvers is not intercepted there.
 
-- Status becomes **Active - Encrypted** about half a second after the plugin starts or the Wi-Fi connects
-  (dnsproxy start + verified lookup).
-- Link DNS is `127.0.0.2` (dnsproxy) first and the provider's plain server (`1.1.1.1`) second. If dnsproxy ever
-  dies, the system resolver still has a working server and the internet doesn't drop.
-- Diagnostics: Network Blocked, DoH OK, Deck OK.
+- Status becomes **Active · (provider) · Encrypted** after dnsproxy start + DNS/HTTPS verification (or dns_only
+  if HTTPS does not confirm).
+- In Auto mode, link DNS is `127.0.0.2` (dnsproxy) first and the provider's plain server second. If dnsproxy dies,
+  the system resolver still has a working backup.
+- Diagnostics (0.2.0): Network / Provider / Deck / HTTPS — see field notes in [docs/field-test.md](docs/field-test.md).
+  FPT and similar “DNS OK, Steam broken” reports are **unconfirmed**; compare Automatic vs Cloudflare vs Google
+  on the same link before assuming a provider fix.
 
 ### Phone hotspot (4G)
 
-Tested on a Viettel 4G hotspot: its DNS (`10.109.83.145`) also answers `NXDOMAIN` for Steam; DoH gets through.
+Tested on a Viettel 4G hotspot: its DNS (`10.109.83.145`) also answers `NXDOMAIN` for Steam; encrypted DNS gets through.
 
 - The Deck's internet check takes about 6 s on a hotspot (`connected (site only)` first). The plugin shows
   **Waiting for network** until the check reports full internet, then applies, so it never fights the connection setup.
@@ -96,7 +102,6 @@ Tested on a Viettel 4G hotspot: its DNS (`10.109.83.145`) also answers `NXDOMAIN
   after a switch (requests would hang until timeout), and a fresh start also empties its cache so the verification
   lookup is real. Before this fix, switching from home Wi-Fi to the hotspot left Steam unresolvable while the status
   still said Active.
-- Diagnostics: Network Blocked, DoH OK, Deck OK.
 
 ### Switching networks, Wi-Fi off/on, sleep and wake
 
@@ -143,12 +148,31 @@ see [docs/field-test.md](docs/field-test.md).
 
 ## Troubleshooting
 
-- **Status stuck on Fallback:** run diagnostics. If DoH is Blocked, the network blocks encrypted DNS; try Plain only
-  or another provider. If Network is OK, the network doesn't block Steam and Fallback is harmless.
-- **Steam still won't load but status is Active:** run diagnostics. If Deck is OK, the block isn't DNS (the ISP may
-  block by IP or SNI); a VPN is needed for that.
-- **Logs:** `~/homebrew/logs/decky-dns-unblock/` (plugin log per start, `dnsproxy.log` for the proxy).
+- **Status stuck on Fallback:** run diagnostics. If Provider lookups fail while Network works, try another provider
+  or Plain only. If Network already resolves Steam, Fallback may be harmless for Steam.
+- **Steam still won't load but status is Active:** run diagnostics. If Provider/Deck DNS and HTTPS look fine, the
+  problem may be beyond DNS (IP/SNI filtering, Steam client, account). Switching Automatic↔Google can help gather
+  evidence; it also restarts the proxy. Do not assume FPT (or any ISP) is “fixed” from DNS alone.
+- **Logs:** `~/homebrew/logs/decky-dns-unblock/` (plugin log per start, `dnsproxy.log` / probe logs).
 - **Undo everything by hand:** toggle off, or `sudo nmcli device reapply wlan0`, or just reconnect the Wi-Fi.
+
+### Support report template
+
+Copy when filing an issue (omit MAC/SSID unless you choose to share them):
+
+```text
+Plugin version:
+SteamOS / Decky version:
+Mode (Auto / Encrypted / Plain):
+Provider preference (Automatic / Cloudflare / …):
+Active provider (from status):
+Status line:
+Diagnostics summary:
+Network / Provider / Deck / HTTPS (per domain if useful):
+ISP / connection type (home / hotspot / cafe):
+Did Steam store or community load? (yes/no):
+Time (local) and anything just changed (Wi-Fi switch, sleep, …):
+```
 
 ## Development (Windows)
 

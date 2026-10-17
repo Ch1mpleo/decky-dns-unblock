@@ -328,9 +328,9 @@ async def diagnose(
 
 
 def summarize(rows: list[dict], resolver_label: str = "provider") -> str:
-    """Plain-language summary; blocking is comparative, not a synonym for timeout."""
+    """Short QAM summary; blocking is comparative, not a synonym for timeout."""
     if not rows:
-        return "No diagnostic results."
+        return "No results."
 
     def first(column: str, verdict: str) -> str | None:
         return next((r[column]["detail"] for r in rows if r[column]["verdict"] == verdict), None)
@@ -338,45 +338,46 @@ def summarize(rows: list[dict], resolver_label: str = "provider") -> str:
     parts: list[str] = []
 
     if first("network", POSSIBLE_DNS_BLOCKING):
-        detail = first("network", POSSIBLE_DNS_BLOCKING)
-        parts.append(f"Possible DNS blocking on the network resolver ({detail}).")
+        parts.append(f"Possible DNS blocking ({first('network', POSSIBLE_DNS_BLOCKING)})")
     elif first("network", LOOKUP_FAILED):
-        parts.append(f"Network DNS lookup failed ({first('network', LOOKUP_FAILED)}).")
+        parts.append(f"Network lookup failed ({first('network', LOOKUP_FAILED)})")
     elif all(r["network"]["verdict"] == RESOLVED for r in rows):
-        parts.append("Network DNS resolved Steam.")
+        parts.append("Network OK")
     elif all(r["network"]["verdict"] == UNKNOWN for r in rows):
         pass
     else:
-        parts.append("Network DNS did not fully resolve Steam.")
+        parts.append("Network incomplete")
 
     if first("provider", POSSIBLE_DNS_BLOCKING):
-        parts.append(f"{resolver_label} shows possible DNS blocking ({first('provider', POSSIBLE_DNS_BLOCKING)}).")
+        parts.append(f"Provider blocking ({first('provider', POSSIBLE_DNS_BLOCKING)})")
     elif first("provider", LOOKUP_FAILED):
-        parts.append(f"{resolver_label} lookup failed ({first('provider', LOOKUP_FAILED)}).")
+        parts.append(f"Provider failed ({first('provider', LOOKUP_FAILED)})")
     elif all(r["provider"]["verdict"] == RESOLVED for r in rows):
-        parts.append(f"{resolver_label}: DNS resolved.")
+        parts.append("Provider OK")
     elif all(r["provider"]["verdict"] == UNKNOWN for r in rows):
-        parts.append(f"{resolver_label}: not tested.")
+        parts.append("Provider not tested")
     else:
-        parts.append(f"{resolver_label}: DNS incomplete.")
+        parts.append("Provider incomplete")
 
     if all(r["https"]["verdict"] == httpscheck.REACHABLE for r in rows):
-        parts.append("HTTPS reachable for Steam endpoints.")
+        parts.append("HTTPS OK")
     elif any(r["https"]["verdict"] == httpscheck.HTTP_ERROR for r in rows):
         detail = first("https", httpscheck.HTTP_ERROR) or "HTTP error"
-        parts.append(f"Steam HTTPS returned an HTTP error ({detail}); not inferred as ISP DNS blocking.")
+        parts.append(f"HTTPS {detail} (not DNS blocking)")
     elif any(r["https"]["verdict"] == httpscheck.CONNECTION_FAILED for r in rows):
-        parts.append("Steam access unverified (HTTPS connection failed).")
+        parts.append("HTTPS failed")
     elif all(r["provider"]["verdict"] == RESOLVED for r in rows):
-        parts.append("Steam access unverified.")
+        parts.append("HTTPS unverified")
 
     if first("system", POSSIBLE_DNS_BLOCKING) or first("system", LOOKUP_FAILED):
         detail = first("system", POSSIBLE_DNS_BLOCKING) or first("system", LOOKUP_FAILED)
-        parts.append(f"Deck resolver issue ({detail}).")
+        parts.append(f"Deck issue ({detail})")
     elif all(r["system"]["verdict"] == RESOLVED for r in rows):
-        parts.append("Deck resolver OK.")
+        parts.append("Deck OK")
 
-    return " ".join(parts) if parts else "Diagnostics complete."
+    # Full resolver identity is shown under the Steam lookups table in the UI.
+    _ = resolver_label
+    return " · ".join(parts) if parts else "Done."
 
 
 # Backward-compatible alias used by older tests / call sites that only need the network-block story.

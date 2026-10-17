@@ -65,22 +65,22 @@ class SummaryTests(unittest.TestCase):
             health.POSSIBLE_DNS_BLOCKING, health.RESOLVED, health.RESOLVED, "reachable", "NXDOMAIN"
         )])
         self.assertIn("Possible DNS blocking", text)
-        self.assertIn("DNS resolved", text)
-        self.assertIn("HTTPS reachable", text)
+        self.assertIn("Provider OK", text)
+        self.assertIn("HTTPS OK", text)
 
     def test_https_unverified(self):
         text = health.summarize([diag_row(
             health.RESOLVED, health.RESOLVED, health.RESOLVED, "connection_failed", "timeout"
         )])
-        self.assertIn("Steam access unverified", text)
+        self.assertIn("HTTPS failed", text)
         self.assertNotIn("Possible DNS blocking", text)
 
     def test_http_error_not_called_blocking(self):
         text = health.summarize([diag_row(
             health.RESOLVED, health.RESOLVED, health.RESOLVED, "http_error", "HTTP 503"
         )])
-        self.assertIn("HTTP error", text)
-        self.assertIn("not inferred as ISP DNS blocking", text)
+        self.assertIn("HTTPS", text)
+        self.assertIn("not DNS blocking", text)
 
 
 class DohUrlTests(unittest.TestCase):

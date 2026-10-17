@@ -52,29 +52,30 @@ function useSticky<T>(key: string, initial: T): [T, (value: T) => void] {
   return [value, set];
 }
 
+// Short labels so the QAM table stays readable in a narrow sidebar.
 const DNS_STYLE: Record<string, [string, string]> = {
-  resolved: ["Resolved", "#59bf40"],
+  resolved: ["OK", "#59bf40"],
   ok: ["OK", "#59bf40"],
-  possible_dns_blocking: ["Blocking?", "#ff6b6b"],
-  blocked: ["Blocked", "#ff6b6b"],
-  lookup_failed: ["Lookup fail", "#e6a23c"],
+  possible_dns_blocking: ["Block", "#ff6b6b"],
+  blocked: ["Block", "#ff6b6b"],
+  lookup_failed: ["Fail", "#e6a23c"],
   unknown: ["-", "inherit"],
 };
 
 const HTTPS_STYLE: Record<string, [string, string]> = {
-  reachable: ["HTTPS OK", "#59bf40"],
-  http_error: ["HTTP err", "#e6a23c"],
-  connection_failed: ["No HTTPS", "#ff6b6b"],
+  reachable: ["OK", "#59bf40"],
+  http_error: ["HTTP", "#e6a23c"],
+  connection_failed: ["Fail", "#ff6b6b"],
   unknown: ["-", "inherit"],
 };
 
 // store.steampowered.com -> store, steamcommunity.com -> community
 const shortDomain = (domain: string) => domain.split(".")[0].replace(/^steam/, "");
 
-const CELL: React.CSSProperties = { padding: "4px 6px", textAlign: "left" };
+const CELL: React.CSSProperties = { padding: "2px 4px", textAlign: "left" };
 const DIVIDER = "1px solid rgba(255, 255, 255, 0.1)";
 
-function DiagnosticsTable({ rows, resolver }: { rows: Diagnostics["rows"]; resolver: string }) {
+function DiagnosticsTable({ rows }: { rows: Diagnostics["rows"] }) {
   const dnsCell = (v: DnsCell) => {
     const [text, color] = DNS_STYLE[v.verdict] ?? DNS_STYLE.unknown;
     return <td style={{ ...CELL, color, fontWeight: 600 }} title={v.detail}>{text}</td>;
@@ -84,31 +85,26 @@ function DiagnosticsTable({ rows, resolver }: { rows: Diagnostics["rows"]; resol
     return <td style={{ ...CELL, color, fontWeight: 600 }} title={v.detail}>{text}</td>;
   };
   return (
-    <div style={{ width: "100%" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-        <thead>
-          <tr style={{ opacity: 0.6 }}>
-            {["Domain", "Network", "Provider", "Deck", "HTTPS"].map((h) => (
-              <th key={h} style={{ ...CELL, fontWeight: 400 }}>{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.domain} style={{ borderTop: DIVIDER }}>
-              <td style={CELL}>{shortDomain(row.domain)}</td>
-              {dnsCell(row.network)}
-              {dnsCell(row.provider)}
-              {dnsCell(row.system)}
-              {httpsCell(row.https)}
-            </tr>
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px" }}>
+      <thead>
+        <tr style={{ opacity: 0.6 }}>
+          {["Domain", "Net", "Prov", "Deck", "HTTPS"].map((h) => (
+            <th key={h} style={{ ...CELL, fontWeight: 400 }}>{h}</th>
           ))}
-        </tbody>
-      </table>
-      <div style={{ fontSize: "11px", opacity: 0.6, marginTop: "6px", lineHeight: 1.4 }}>
-        Network: Wi-Fi DNS · Provider: {resolver} · Deck: systemd-resolved · HTTPS: Steam over TLS
-      </div>
-    </div>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.domain} style={{ borderTop: DIVIDER }}>
+            <td style={CELL}>{shortDomain(row.domain)}</td>
+            {dnsCell(row.network)}
+            {dnsCell(row.provider)}
+            {dnsCell(row.system)}
+            {httpsCell(row.https)}
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -116,13 +112,10 @@ const dnsName = (server: string) => (server === PROXY_ADDR ? "dnsproxy (DoH)" : 
 
 function StatusTable({ status }: { status: Status }) {
   const rows: [string, string][] = [
-    ["Wi-Fi", status.device ? `${status.device} · internet ${status.connectivity}` : "-"],
+    ["Wi-Fi", status.device ? `${status.device} · ${status.connectivity}` : "-"],
     ["DNS", status.link_dns.map(dnsName).join(", ") || "-"],
     ["In use", status.current_dns ? dnsName(status.current_dns) : "-"],
   ];
-  if (status.active_provider) {
-    rows.push(["Provider", labelOf(PROVIDER_OPTIONS, status.active_provider).replace(" (recommended)", "")]);
-  }
   if (status.message) rows.push(["Note", status.message]);
   return (
     <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", columnGap: "10px", rowGap: "2px" }}>
@@ -179,6 +172,13 @@ function DiagnosticsSection({ status }: { status?: Status }) {
     }
   };
 
+  const meta = result
+    ? [
+        result.network_dns.join(", ") || "no DHCP DNS",
+        result.resolver,
+      ].join(" · ")
+    : "";
+
   return (
     <PanelSection title="Diagnostics">
       <PanelSectionRow>
@@ -193,33 +193,14 @@ function DiagnosticsSection({ status }: { status?: Status }) {
           </PanelSectionRow>
           <PanelSectionRow>
             <Field
-              label="Context"
-              description={[
-                result.resolver,
-                result.mode,
-                result.active_provider || result.provider,
-              ].filter(Boolean).join(" · ")}
-              focusable
-              highlightOnFocus
-            />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <Field
-              label="Network DNS"
-              description={result.network_dns.join(", ") || "None from DHCP"}
-              focusable
-              highlightOnFocus
-            />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <Field
               label="Steam lookups"
+              description={meta}
               childrenLayout="below"
               childrenContainerWidth="max"
               focusable
               highlightOnFocus
             >
-              <DiagnosticsTable rows={result.rows} resolver={result.resolver} />
+              <DiagnosticsTable rows={result.rows} />
             </Field>
           </PanelSectionRow>
         </>
@@ -286,7 +267,7 @@ function Content() {
         <PanelSectionRow>
           <ToggleField
             label="Bypass Steam block"
-            description="Use encrypted DNS on any Wi-Fi"
+            description="Encrypted DNS on any Wi-Fi"
             checked={status?.enabled ?? false}
             disabled={disabled}
             onChange={(enabled) => update(() => setEnabled(enabled))}
@@ -320,7 +301,7 @@ function Content() {
             <PanelSectionRow>
               <TextField
                 label="Custom DNS servers"
-                description="IPv4/IPv6, separated by commas"
+                description="IPv4/IPv6, comma-separated"
                 value={customText ?? ""}
                 disabled={disabled}
                 onChange={(e) => setCustomText(e.target.value)}
