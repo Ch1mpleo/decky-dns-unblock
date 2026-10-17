@@ -2,6 +2,9 @@ import { callable } from "@decky/api";
 
 export type Mode = "auto" | "encrypted" | "plain";
 
+export type Verification = "verified" | "dns_only" | "failed" | null;
+export type ObservedTransport = "encrypted" | "plain" | "network" | null;
+
 export type Status = {
   enabled: boolean;
   mode: Mode;
@@ -14,6 +17,11 @@ export type Status = {
   current_dns: string | null;
   connectivity: string;
   proxy_running: boolean;
+  /** Provider actually in use (may differ from preference when Automatic). */
+  active_provider: string | null;
+  observed_transport: ObservedTransport;
+  verification: Verification;
+  verification_at: number | null;
 };
 
 export const PROXY_ADDR = "127.0.0.2";
@@ -63,5 +71,30 @@ export const PROVIDER_OPTIONS = [
 
 export const labelOf = (options: { data: string; label: string }[], value: string) =>
   options.find((o) => o.data === value)?.label ?? value;
+
+const SHORT_PROVIDER: Record<string, string> = {
+  automatic: "Automatic",
+  cloudflare: "Cloudflare",
+  google: "Google",
+  quad9: "Quad9",
+  custom: "Custom",
+};
+
+const transportName = (t: ObservedTransport) =>
+  t === "encrypted" ? "Encrypted" : t === "plain" ? "Plain" : t === "network" ? "Network DNS" : "—";
+
+/** Concise status, e.g. "Active · Google · Encrypted". */
+export const statusLabel = (status: Status) => {
+  if (status.state === "active_encrypted" || status.state === "active_plain") {
+    const active = status.active_provider ?? status.provider;
+    const transport = status.observed_transport
+      ?? (status.state === "active_encrypted" ? "encrypted" : "plain");
+    const name = SHORT_PROVIDER[active] ?? labelOf(PROVIDER_OPTIONS, active);
+    let label = `Active · ${name} · ${transportName(transport)}`;
+    if (status.verification === "dns_only") label += " (Steam unverified)";
+    return label;
+  }
+  return STATE_LABELS[status.state] ?? status.state;
+};
 
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));

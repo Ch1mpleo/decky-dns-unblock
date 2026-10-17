@@ -162,3 +162,10 @@ async def restore(device: str) -> None:
     # A device that is down or gone has nothing to undo: its next activation uses the profile anyway.
     if code != 0 and "not activated" not in message and "not found" not in message:
         raise CommandError(f"nmcli device reapply {device} failed ({code}): {message}")
+
+
+async def flush_caches() -> None:
+    """Best-effort systemd-resolved cache flush after applying DNS (non-fatal on failure)."""
+    code, out, err = await run(RESOLVECTL, "flush-caches")
+    if code != 0:
+        raise CommandError(f"resolvectl flush-caches failed ({code}): {(err or out).strip()}")

@@ -24,7 +24,6 @@ import {
   NOTIFY_STATES,
   PROVIDER_OPTIONS,
   PROXY_ADDR,
-  STATE_LABELS,
   Status,
   Verdict,
   errorText,
@@ -34,6 +33,7 @@ import {
   setEnabled,
   setMode,
   setProvider,
+  statusLabel,
 } from "./api";
 
 const toast = (body: string) => toaster.toast({ title: "DNS Unblock", body });
@@ -101,6 +101,9 @@ function StatusTable({ status }: { status: Status }) {
     ["DNS", status.link_dns.map(dnsName).join(", ") || "-"],
     ["In use", status.current_dns ? dnsName(status.current_dns) : "-"],
   ];
+  if (status.active_provider) {
+    rows.push(["Provider", labelOf(PROVIDER_OPTIONS, status.active_provider).replace(" (recommended)", "")]);
+  }
   if (status.message) rows.push(["Note", status.message]);
   return (
     <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", columnGap: "10px", rowGap: "2px" }}>
@@ -124,7 +127,7 @@ function StatusRow({ status }: { status?: Status }) {
       focusable
       highlightOnFocus
     >
-      {STATE_LABELS[status.state] ?? status.state}
+      {statusLabel(status)}
     </Field>
   );
 }
@@ -296,7 +299,7 @@ export default definePlugin(() => {
   let lastState: string | undefined;
   const listener = addEventListener<[Status]>("status", (s) => {
     if (lastState !== undefined && s.state !== lastState && NOTIFY_STATES.includes(s.state)) {
-      toast(`${STATE_LABELS[s.state] ?? s.state}${s.message ? `: ${s.message}` : ""}`);
+      toast(`${statusLabel(s)}${s.message ? `: ${s.message}` : ""}`);
     }
     lastState = s.state;
   });

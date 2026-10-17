@@ -43,6 +43,29 @@ def _ensure_executable(binary: str) -> None:
         os.chmod(binary, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def is_our_dnsproxy(
+    cmdline: bytes,
+    binary: str,
+    listen: str = LISTEN_ADDR,
+    port: int = LISTEN_PORT,
+) -> bool:
+    """True if /proc cmdline is this plugin's live dnsproxy (exact binary path + -l/-p)."""
+    parts = [p for p in cmdline.split(b"\x00") if p]
+    if not parts:
+        return False
+    exe = os.path.normpath(os.fsdecode(parts[0]))
+    expected = os.path.normpath(binary)
+    if exe != expected:
+        return False
+    try:
+        listen_idx = parts.index(b"-l")
+        port_idx = parts.index(b"-p")
+        return parts[listen_idx + 1] == listen.encode() and parts[port_idx + 1] == str(port).encode()
+    except (ValueError, IndexError):
+        return False
+
+
+
 class Proxy:
     def __init__(self, binary: str, pid_path: str, log_path: str, logger: logging.Logger,
                  on_exit: Callable[[int], None]):
@@ -108,7 +131,7 @@ class Proxy:
             self.on_exit(code)
 
     async def kill_stale(self) -> None:
-        """Kill a dnsproxy recorded by a previous run that didn't shut down cleanly."""
+        """Kill a leftover live dnsproxy recorded by a previous run (plugin binary + expected -l/-p)."""
         try:
             with open(self.pid_path, encoding="utf-8") as f:
                 pid = int(f.read().strip())
@@ -117,7 +140,7 @@ class Proxy:
         except (OSError, ValueError):
             self._clear_pid()
             return
-        if b"dnsproxy" in cmdline:
+        if is_our_dnsproxy(cmdline, self.binary, self.listen, self.port):
             self.logger.info("Killing dnsproxy left by a previous run (pid %s)", pid)
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -128,6 +151,8 @@ class Proxy:
                 if not os.path.exists(f"/proc/{pid}"):
                     break
                 await asyncio.sleep(0.1)
+        else:
+            self.logger.info("Ignoring pid %s; cmdline is not this plugin's dnsproxy", pid)
         self._clear_pid()
 
     def _write_pid(self, pid: int) -> None:

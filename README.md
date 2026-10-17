@@ -130,7 +130,7 @@ see [docs/field-test.md](docs/field-test.md).
 | The system resolver drifts to the backup server after a dnsproxy hiccup (it doesn't switch back by itself) | Opening the panel notices "In use" isn't dnsproxy and moves it back. |
 | Decky or the plugin crashes / is killed | DNS changes are runtime-only, so the next reconnect or reboot restores the network's DNS. On the next start a leftover dnsproxy is killed and leftover DNS is cleaned up first. |
 | Reboot | Saved Wi-Fi profiles were never changed, so the Deck boots with normal DNS; the plugin re-applies when Decky starts. |
-| Plugin disabled or uninstalled | dnsproxy stopped and the network's DNS restored before unloading. |
+| Plugin disabled or uninstalled | Network DNS restored first (retries on unload), then dnsproxy stopped. If restore fails, the marker and proxy are kept for the next start. |
 | IPv6-disabled profiles (Steam creates some) | IPv6 DNS settings are rejected there; the plugin retries with IPv4 only. |
 
 ## Safety and privacy

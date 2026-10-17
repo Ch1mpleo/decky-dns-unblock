@@ -29,6 +29,26 @@ class ProxyArgsTests(unittest.TestCase):
         self.assertEqual(proxy.PROBE_PORTS, (15353, 15354, 15355))
 
 
+class OurDnsproxyTests(unittest.TestCase):
+    def test_matches_plugin_binary_and_listen(self):
+        binary = "/home/deck/homebrew/plugins/decky-dns-unblock/bin/dnsproxy"
+        cmdline = b"\x00".join([
+            binary.encode(), b"-l", b"127.0.0.2", b"-p", b"53",
+            b"-u", b"https://1.1.1.1/dns-query", b"",
+        ])
+        self.assertTrue(proxy.is_our_dnsproxy(cmdline, binary))
+
+    def test_rejects_other_binary_or_probe_port(self):
+        binary = "/plugins/decky-dns-unblock/bin/dnsproxy"
+        other = b"/usr/bin/dnsproxy\x00-l\x00127.0.0.2\x00-p\x0053\x00"
+        self.assertFalse(proxy.is_our_dnsproxy(other, binary))
+        probe = b"\x00".join([binary.encode(), b"-l", b"127.0.0.2", b"-p", b"15353", b""])
+        self.assertFalse(proxy.is_our_dnsproxy(probe, binary))
+
+    def test_rejects_unrelated_process(self):
+        self.assertFalse(proxy.is_our_dnsproxy(b"python3\x00main.py\x00", "/bin/dnsproxy"))
+
+
 class ProbeProxyTests(unittest.IsolatedAsyncioTestCase):
     async def test_tries_next_port_when_process_exits(self):
         logger = logging.getLogger("test-probe")
