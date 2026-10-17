@@ -1,10 +1,12 @@
+import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
 
-from dns_unblock import dnsquery, health
+from dns_unblock import dnsquery, health, httpscheck
 
 
-def result(rcode="NOERROR", addresses=(), error=None):
-    return dnsquery.Result(server="x", name="store.steampowered.com", rcode=rcode, addresses=list(addresses), error=error)
+def result(rcode="NOERROR", addresses=(), error=None, name="store.steampowered.com"):
+    return dnsquery.Result(server="x", name=name, rcode=rcode, addresses=list(addresses), error=error)
 
 
 class ClassifyTests(unittest.TestCase):
@@ -24,6 +26,15 @@ class ClassifyTests(unittest.TestCase):
 
     def test_no_server(self):
         self.assertEqual(health.classify(None)[0], health.UNKNOWN)
+
+
+class DnsOutcomeTests(unittest.TestCase):
+    def test_resolved_vs_blocking_vs_lookup(self):
+        self.assertEqual(health.dns_outcome(result(addresses=["23.15.142.182"]))[0], health.RESOLVED)
+        self.assertEqual(health.dns_outcome(result(rcode="NXDOMAIN"))[0], health.POSSIBLE_DNS_BLOCKING)
+        self.assertEqual(health.dns_outcome(result(rcode="SERVFAIL"))[0], health.POSSIBLE_DNS_BLOCKING)
+        self.assertEqual(health.dns_outcome(result(error="timeout"))[0], health.LOOKUP_FAILED)
+        self.assertEqual(health.dns_outcome(result(error="Connection refused"))[0], health.LOOKUP_FAILED)
 
 
 def row(network, doh, system, detail="NXDOMAIN"):
@@ -51,6 +62,120 @@ class DohUrlTests(unittest.TestCase):
         url = dnsquery.doh_url("https://1.1.1.1/dns-query", "example.com")
         # ID 0, RD set, base64url without padding (RFC 8484 section 4.1).
         self.assertEqual(url, "https://1.1.1.1/dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE")
+
+
+class ResolveDomainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_aaaa_missing_alone_is_ok(self):
+        async def fake_query(server, name, qtype=dnsquery.TYPE_A, timeout=3.0, port=53):
+            if qtype == dnsquery.TYPE_A:
+                return result(addresses=["23.15.142.182"], name=name)
+            return result(rcode="NOERROR", addresses=(), name=name)  # empty AAAA
+
+        with patch("dns_unblock.dnsquery.aquery", side_effect=fake_query):
+            row = await health.resolve_domain("1.1.1.1", "store.steampowered.com")
+        self.assertEqual(row.outcome, health.RESOLVED)
+        self.assertEqual(row.addresses, ["23.15.142.182"])
+
+    async def test_a_missing_aaaa_ok(self):
+        async def fake_query(server, name, qtype=dnsquery.TYPE_A, timeout=3.0, port=53):
+            if qtype == dnsquery.TYPE_AAAA:
+                return result(addresses=["2606:4700:4700::1111"], name=name)
+            return result(rcode="NXDOMAIN", name=name)
+
+        with patch("dns_unblock.dnsquery.aquery", side_effect=fake_query):
+            row = await health.resolve_domain("1.1.1.1", "steamcommunity.com")
+        self.assertEqual(row.outcome, health.RESOLVED)
+        self.assertEqual(row.addresses, ["2606:4700:4700::1111"])
+
+    async def test_nxdomain_both(self):
+        async def fake_query(server, name, qtype=dnsquery.TYPE_A, timeout=3.0, port=53):
+            return result(rcode="NXDOMAIN", name=name)
+
+        with patch("dns_unblock.dnsquery.aquery", side_effect=fake_query):
+            row = await health.resolve_domain("192.168.1.1", "store.steampowered.com")
+        self.assertEqual(row.outcome, health.POSSIBLE_DNS_BLOCKING)
+
+
+class ProbeDnsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_both_domains_required(self):
+        async def fake_resolve(server, domain, timeout=3.0, port=53):
+            if domain.startswith("store"):
+                return health.DomainDns(domain, health.RESOLVED, "1.2.3.4", ["1.2.3.4"])
+            return health.DomainDns(domain, health.POSSIBLE_DNS_BLOCKING, "NXDOMAIN")
+
+        with patch("dns_unblock.health.resolve_domain", side_effect=fake_resolve):
+            probe = await health.probe_dns("1.1.1.1")
+        self.assertFalse(probe.ok)
+        self.assertIn("steamcommunity.com", probe.detail)
+
+    async def test_success(self):
+        async def fake_resolve(server, domain, timeout=3.0, port=53):
+            return health.DomainDns(domain, health.RESOLVED, "9.9.9.9", ["9.9.9.9"])
+
+        with patch("dns_unblock.health.resolve_domain", side_effect=fake_resolve):
+            probe = await health.probe_dns("9.9.9.9")
+        self.assertTrue(probe.ok)
+
+
+class VerifyPlainServersTests(unittest.IsolatedAsyncioTestCase):
+    async def test_secondary_succeeds_when_primary_fails(self):
+        async def fake_probe(server, domains=health.PROBE_DOMAINS, timeout=3.0, port=53, attempts=1):
+            ok = server == "1.0.0.1"
+            return health.DnsProbe(ok, "ok" if ok else "timeout", [])
+
+        with patch("dns_unblock.health.probe_dns", side_effect=fake_probe):
+            v4, v6, detail = await health.verify_plain_servers(["1.1.1.1", "1.0.0.1"], ["2606:4700:4700::1111"])
+        self.assertEqual(v4, ["1.0.0.1"])
+        self.assertEqual(v6, [])
+        self.assertEqual(detail, "1.0.0.1")
+
+    async def test_ipv6_only_when_reachable(self):
+        async def fake_probe(server, domains=health.PROBE_DOMAINS, timeout=3.0, port=53, attempts=1):
+            ok = ":" in server
+            return health.DnsProbe(ok, "ok" if ok else "fail", [])
+
+        with patch("dns_unblock.health.probe_dns", side_effect=fake_probe):
+            v4, v6, _ = await health.verify_plain_servers(["1.1.1.1"], ["2606:4700:4700::1111"])
+        self.assertEqual(v4, [])
+        self.assertEqual(v6, ["2606:4700:4700::1111"])
+
+
+class EvaluateResolverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dns_ok_https_fail_is_dns_only(self):
+        dns = health.DnsProbe(True, "1.2.3.4", [
+            health.DomainDns("store.steampowered.com", health.RESOLVED, "1.2.3.4", ["1.2.3.4"]),
+            health.DomainDns("steamcommunity.com", health.RESOLVED, "1.2.3.5", ["1.2.3.5"]),
+        ])
+        https = health.HttpsProbe(False, "timeout", [])
+        with patch("dns_unblock.health.probe_dns", AsyncMock(return_value=dns)), \
+             patch("dns_unblock.health.probe_https", AsyncMock(return_value=https)):
+            evaluation = await health.evaluate_resolver("1.1.1.1")
+        self.assertTrue(evaluation.dns_ok)
+        self.assertFalse(evaluation.https_ok)
+        self.assertTrue(evaluation.dns_only)
+
+    async def test_overall_timeout(self):
+        async def slow(*_a, **_k):
+            await asyncio.sleep(10)
+            return health.DnsProbe(True, "x", [])
+
+        with patch("dns_unblock.health.probe_dns", side_effect=slow):
+            evaluation = await health.evaluate_resolver("1.1.1.1", overall_timeout=0.05)
+        self.assertFalse(evaluation.dns_ok)
+        self.assertIn("timed out", evaluation.detail)
+
+
+class ProbeHttpsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_domains(self):
+        async def fake(hostname, addresses, timeout=5.0):
+            return httpscheck.HttpsResult(hostname, addresses[0], httpscheck.REACHABLE, "HTTP 200", 200)
+
+        with patch("dns_unblock.httpscheck.check_hostname", side_effect=fake):
+            probe = await health.probe_https({
+                "store.steampowered.com": ["1.1.1.1"],
+                "steamcommunity.com": ["1.0.0.1"],
+            })
+        self.assertTrue(probe.ok)
 
 
 if __name__ == "__main__":

@@ -278,7 +278,8 @@ class Plugin:
             started = await self.proxy.start(list(candidate.doh))
         except OSError as e:
             return False, f"dnsproxy: {e}"
-        ok, detail = await health.verify(LISTEN_ADDR, timeout=4.0, attempts=5)
+        # Dual-domain A/AAAA; short refused retries fit inside the provider evaluation budget.
+        ok, detail = await health.verify(LISTEN_ADDR, timeout=health.DNS_TIMEOUT, attempts=3)
         if not ok:
             await self.proxy.stop()
             return False, detail
@@ -289,9 +290,9 @@ class Plugin:
         return True, detail
 
     async def _try_plain(self, device: str, candidate: providers.Candidate) -> tuple[bool, str]:
-        v4, v6 = list(candidate.v4), list(candidate.v6)
-        ok, detail = await health.verify((v4 or v6)[0], timeout=3.0)
-        if not ok:
+        # Test primary/secondary (and IPv6) independently; configure only verified servers.
+        v4, v6, detail = await health.verify_plain_servers(list(candidate.v4), list(candidate.v6))
+        if not v4 and not v6:
             return False, detail
         await self.proxy.stop()
         await self._set_link(device, v4, v6)
