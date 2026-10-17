@@ -20,9 +20,6 @@ PROBE_DOMAINS = (
     "steamcommunity.com",
 )
 SYSTEM_RESOLVER = "127.0.0.53"
-# Reference for "does encrypted DNS work from this network". Fixed rather than the chosen provider because
-# urllib only speaks HTTP/1.1 and Quad9's DoH on port 443 requires HTTP/2.
-REFERENCE_DOH = "https://1.1.1.1/dns-query"
 
 DNS_TIMEOUT = 3.0
 HTTPS_TIMEOUT = httpscheck.HTTPS_TIMEOUT
@@ -269,30 +266,122 @@ async def verify(server: str, timeout: float = DNS_TIMEOUT, attempts: int = 1, p
     return probe.ok, probe.detail
 
 
-async def diagnose(network_dns: list[str], timeout: float = DNS_TIMEOUT) -> list[dict]:
-    """For each Steam domain, compare the network's own DNS, encrypted DNS (DoH) and what the Deck resolves now."""
-    def verdict(result: dnsquery.Result | None) -> dict:
-        v, detail = classify(result)
-        return {"verdict": v, "detail": detail}
+def _dns_cell(domain_dns: DomainDns | None) -> dict:
+    if domain_dns is None:
+        return {"verdict": UNKNOWN, "detail": "no server", "addresses": []}
+    return {
+        "verdict": domain_dns.outcome,
+        "detail": domain_dns.detail,
+        "addresses": list(domain_dns.addresses),
+    }
 
-    async def plain(server: str | None, domain: str) -> dict:
-        return verdict(await dnsquery.aquery(server, domain, timeout=timeout) if server else None)
 
-    async def doh(domain: str) -> dict:
-        return verdict(await dnsquery.adoh_query(REFERENCE_DOH, domain, timeout=timeout + 1))
+def _https_cell(result: httpscheck.HttpsResult | None) -> dict:
+    if result is None:
+        return {"verdict": UNKNOWN, "detail": "skipped", "status_code": None}
+    return {
+        "verdict": result.outcome,
+        "detail": result.detail,
+        "status_code": result.status_code,
+    }
 
+
+async def diagnose(
+    network_dns: list[str],
+    provider_server: str | None,
+    provider_port: int = 53,
+    domains: tuple[str, ...] = PROBE_DOMAINS,
+    timeout: float = DNS_TIMEOUT,
+    https_timeout: float = HTTPS_TIMEOUT,
+) -> list[dict]:
+    """Per-domain Network / Provider / Deck DNS cells plus HTTPS against provider-resolved addresses.
+
+    Provider is whatever the plugin chose to test (live dnsproxy, plain server, or temporary probe) —
+    not a fixed Cloudflare DoH URL.
+    """
     network_server = network_dns[0] if network_dns else None
-    rows = await asyncio.gather(*(
-        asyncio.gather(plain(network_server, d), doh(d), plain(SYSTEM_RESOLVER, d)) for d in STEAM_DOMAINS
-    ))
-    return [
-        {"domain": domain, "network": network, "doh": doh_result, "system": system}
-        for domain, (network, doh_result, system) in zip(STEAM_DOMAINS, rows)
-    ]
+
+    async def missing(domain: str) -> DomainDns:
+        return DomainDns(domain, UNKNOWN, "no server")
+
+    async def one_domain(domain: str) -> dict:
+        network_row, provider_row, system_row = await asyncio.gather(
+            resolve_domain(network_server, domain, timeout=timeout) if network_server else missing(domain),
+            resolve_domain(provider_server, domain, timeout=timeout, port=provider_port)
+            if provider_server else missing(domain),
+            resolve_domain(SYSTEM_RESOLVER, domain, timeout=timeout),
+        )
+        # Prefer provider-resolved addresses for HTTPS so we do not use system DNS.
+        addresses = provider_row.addresses or system_row.addresses
+        https_result = None
+        if addresses:
+            https_result = await httpscheck.check_hostname(domain, addresses, timeout=https_timeout)
+        return {
+            "domain": domain,
+            "network": _dns_cell(network_row),
+            "provider": _dns_cell(provider_row),
+            "system": _dns_cell(system_row),
+            "https": _https_cell(https_result),
+        }
+
+    return list(await asyncio.gather(*(one_domain(d) for d in domains)))
 
 
-def summarize(rows: list[dict]) -> str:
-    """One or two plain sentences explaining the diagnostics table."""
+def summarize(rows: list[dict], resolver_label: str = "provider") -> str:
+    """Plain-language summary; blocking is comparative, not a synonym for timeout."""
+    if not rows:
+        return "No diagnostic results."
+
+    def first(column: str, verdict: str) -> str | None:
+        return next((r[column]["detail"] for r in rows if r[column]["verdict"] == verdict), None)
+
+    parts: list[str] = []
+
+    if first("network", POSSIBLE_DNS_BLOCKING):
+        detail = first("network", POSSIBLE_DNS_BLOCKING)
+        parts.append(f"Possible DNS blocking on the network resolver ({detail}).")
+    elif first("network", LOOKUP_FAILED):
+        parts.append(f"Network DNS lookup failed ({first('network', LOOKUP_FAILED)}).")
+    elif all(r["network"]["verdict"] == RESOLVED for r in rows):
+        parts.append("Network DNS resolved Steam.")
+    elif all(r["network"]["verdict"] == UNKNOWN for r in rows):
+        pass
+    else:
+        parts.append("Network DNS did not fully resolve Steam.")
+
+    if first("provider", POSSIBLE_DNS_BLOCKING):
+        parts.append(f"{resolver_label} shows possible DNS blocking ({first('provider', POSSIBLE_DNS_BLOCKING)}).")
+    elif first("provider", LOOKUP_FAILED):
+        parts.append(f"{resolver_label} lookup failed ({first('provider', LOOKUP_FAILED)}).")
+    elif all(r["provider"]["verdict"] == RESOLVED for r in rows):
+        parts.append(f"{resolver_label}: DNS resolved.")
+    elif all(r["provider"]["verdict"] == UNKNOWN for r in rows):
+        parts.append(f"{resolver_label}: not tested.")
+    else:
+        parts.append(f"{resolver_label}: DNS incomplete.")
+
+    if all(r["https"]["verdict"] == httpscheck.REACHABLE for r in rows):
+        parts.append("HTTPS reachable for Steam endpoints.")
+    elif any(r["https"]["verdict"] == httpscheck.HTTP_ERROR for r in rows):
+        detail = first("https", httpscheck.HTTP_ERROR) or "HTTP error"
+        parts.append(f"Steam HTTPS returned an HTTP error ({detail}); not inferred as ISP DNS blocking.")
+    elif any(r["https"]["verdict"] == httpscheck.CONNECTION_FAILED for r in rows):
+        parts.append("Steam access unverified (HTTPS connection failed).")
+    elif all(r["provider"]["verdict"] == RESOLVED for r in rows):
+        parts.append("Steam access unverified.")
+
+    if first("system", POSSIBLE_DNS_BLOCKING) or first("system", LOOKUP_FAILED):
+        detail = first("system", POSSIBLE_DNS_BLOCKING) or first("system", LOOKUP_FAILED)
+        parts.append(f"Deck resolver issue ({detail}).")
+    elif all(r["system"]["verdict"] == RESOLVED for r in rows):
+        parts.append("Deck resolver OK.")
+
+    return " ".join(parts) if parts else "Diagnostics complete."
+
+
+# Backward-compatible alias used by older tests / call sites that only need the network-block story.
+def summarize_legacy(rows: list[dict]) -> str:
+    """Summarize rows that still use ok/blocked/unknown + doh column (unit tests / migration)."""
     def first_blocked(column: str) -> str | None:
         return next((r[column]["detail"] for r in rows if r[column]["verdict"] == BLOCKED), None)
 
@@ -302,7 +391,7 @@ def summarize(rows: list[dict]) -> str:
         parts.append(f"Your network's DNS blocks Steam ({network}).")
     elif all(r["network"]["verdict"] == OK for r in rows):
         parts.append("Your network's DNS doesn't block Steam.")
-    doh = first_blocked("doh")
+    doh = first_blocked("doh") if rows and "doh" in rows[0] else None
     if doh:
         parts.append(f"Encrypted DNS can't get through on this network ({doh}).")
     system = first_blocked("system")

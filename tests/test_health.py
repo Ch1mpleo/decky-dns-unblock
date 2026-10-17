@@ -37,24 +37,50 @@ class DnsOutcomeTests(unittest.TestCase):
         self.assertEqual(health.dns_outcome(result(error="Connection refused"))[0], health.LOOKUP_FAILED)
 
 
-def row(network, doh, system, detail="NXDOMAIN"):
+def legacy_row(network, doh, system, detail="NXDOMAIN"):
     v = lambda verdict: {"verdict": verdict, "detail": detail if verdict == health.BLOCKED else "1.2.3.4"}
     return {"domain": "store.steampowered.com", "network": v(network), "doh": v(doh), "system": v(system)}
 
 
+def diag_row(network, provider, system, https, detail="NXDOMAIN"):
+    cell = lambda verdict, d=detail: {"verdict": verdict, "detail": d if verdict != health.RESOLVED else "1.2.3.4", "addresses": []}
+    return {
+        "domain": "store.steampowered.com",
+        "network": cell(network),
+        "provider": cell(provider),
+        "system": cell(system),
+        "https": {"verdict": https, "detail": detail, "status_code": None},
+    }
+
+
 class SummaryTests(unittest.TestCase):
-    def test_blocked_network_fixed_by_deck(self):
-        self.assertEqual(health.summarize([row(health.BLOCKED, health.OK, health.OK)]),
-                         "Your network's DNS blocks Steam (NXDOMAIN). The Deck resolves Steam correctly.")
+    def test_legacy_blocked_network_fixed_by_deck(self):
+        self.assertEqual(
+            health.summarize_legacy([legacy_row(health.BLOCKED, health.OK, health.OK)]),
+            "Your network's DNS blocks Steam (NXDOMAIN). The Deck resolves Steam correctly.",
+        )
 
-    def test_doh_blocked(self):
-        text = health.summarize([row(health.OK, health.BLOCKED, health.OK, detail="timeout")])
-        self.assertIn("doesn't block Steam", text)
-        self.assertIn("Encrypted DNS can't get through on this network (timeout)", text)
+    def test_possible_blocking_vs_lookup_failed(self):
+        text = health.summarize([diag_row(
+            health.POSSIBLE_DNS_BLOCKING, health.RESOLVED, health.RESOLVED, "reachable", "NXDOMAIN"
+        )])
+        self.assertIn("Possible DNS blocking", text)
+        self.assertIn("DNS resolved", text)
+        self.assertIn("HTTPS reachable", text)
 
-    def test_unknown_network_not_mentioned(self):
-        text = health.summarize([row(health.UNKNOWN, health.OK, health.BLOCKED)])
-        self.assertEqual(text, "The Deck can't resolve Steam (NXDOMAIN).")
+    def test_https_unverified(self):
+        text = health.summarize([diag_row(
+            health.RESOLVED, health.RESOLVED, health.RESOLVED, "connection_failed", "timeout"
+        )])
+        self.assertIn("Steam access unverified", text)
+        self.assertNotIn("Possible DNS blocking", text)
+
+    def test_http_error_not_called_blocking(self):
+        text = health.summarize([diag_row(
+            health.RESOLVED, health.RESOLVED, health.RESOLVED, "http_error", "HTTP 503"
+        )])
+        self.assertIn("HTTP error", text)
+        self.assertIn("not inferred as ISP DNS blocking", text)
 
 
 class DohUrlTests(unittest.TestCase):

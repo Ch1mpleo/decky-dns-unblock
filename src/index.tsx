@@ -19,13 +19,15 @@ import { FaShieldAlt } from "react-icons/fa";
 
 import {
   Diagnostics,
+  DnsCell,
+  HttpsCell,
   MODE_OPTIONS,
   Mode,
   NOTIFY_STATES,
   PROVIDER_OPTIONS,
   PROXY_ADDR,
   Status,
-  Verdict,
+  diagnosticsContextKey,
   errorText,
   getStatus,
   labelOf,
@@ -50,9 +52,19 @@ function useSticky<T>(key: string, initial: T): [T, (value: T) => void] {
   return [value, set];
 }
 
-const VERDICT_STYLE: Record<Verdict["verdict"], [string, string]> = {
+const DNS_STYLE: Record<string, [string, string]> = {
+  resolved: ["Resolved", "#59bf40"],
   ok: ["OK", "#59bf40"],
+  possible_dns_blocking: ["Blocking?", "#ff6b6b"],
   blocked: ["Blocked", "#ff6b6b"],
+  lookup_failed: ["Lookup fail", "#e6a23c"],
+  unknown: ["-", "inherit"],
+};
+
+const HTTPS_STYLE: Record<string, [string, string]> = {
+  reachable: ["HTTPS OK", "#59bf40"],
+  http_error: ["HTTP err", "#e6a23c"],
+  connection_failed: ["No HTTPS", "#ff6b6b"],
   unknown: ["-", "inherit"],
 };
 
@@ -62,32 +74,39 @@ const shortDomain = (domain: string) => domain.split(".")[0].replace(/^steam/, "
 const CELL: React.CSSProperties = { padding: "4px 6px", textAlign: "left" };
 const DIVIDER = "1px solid rgba(255, 255, 255, 0.1)";
 
-function DiagnosticsTable({ rows }: { rows: Diagnostics["rows"] }) {
-  const verdictCell = (v: Verdict) => {
-    const [text, color] = VERDICT_STYLE[v.verdict];
-    return <td style={{ ...CELL, color, fontWeight: 600 }}>{text}</td>;
+function DiagnosticsTable({ rows, resolver }: { rows: Diagnostics["rows"]; resolver: string }) {
+  const dnsCell = (v: DnsCell) => {
+    const [text, color] = DNS_STYLE[v.verdict] ?? DNS_STYLE.unknown;
+    return <td style={{ ...CELL, color, fontWeight: 600 }} title={v.detail}>{text}</td>;
+  };
+  const httpsCell = (v: HttpsCell) => {
+    const [text, color] = HTTPS_STYLE[v.verdict] ?? HTTPS_STYLE.unknown;
+    return <td style={{ ...CELL, color, fontWeight: 600 }} title={v.detail}>{text}</td>;
   };
   return (
     <div style={{ width: "100%" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
         <thead>
           <tr style={{ opacity: 0.6 }}>
-            {["Domain", "Network", "DoH", "Deck"].map((h) => <th key={h} style={{ ...CELL, fontWeight: 400 }}>{h}</th>)}
+            {["Domain", "Network", "Provider", "Deck", "HTTPS"].map((h) => (
+              <th key={h} style={{ ...CELL, fontWeight: 400 }}>{h}</th>
+            ))}
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
             <tr key={row.domain} style={{ borderTop: DIVIDER }}>
               <td style={CELL}>{shortDomain(row.domain)}</td>
-              {verdictCell(row.network)}
-              {verdictCell(row.doh)}
-              {verdictCell(row.system)}
+              {dnsCell(row.network)}
+              {dnsCell(row.provider)}
+              {dnsCell(row.system)}
+              {httpsCell(row.https)}
             </tr>
           ))}
         </tbody>
       </table>
       <div style={{ fontSize: "11px", opacity: 0.6, marginTop: "6px", lineHeight: 1.4 }}>
-        Network: this Wi-Fi's DNS · DoH: encrypted DNS (Cloudflare) · Deck: what the Deck uses now
+        Network: Wi-Fi DNS · Provider: {resolver} · Deck: systemd-resolved · HTTPS: Steam over TLS
       </div>
     </div>
   );
@@ -132,9 +151,22 @@ function StatusRow({ status }: { status?: Status }) {
   );
 }
 
-function DiagnosticsSection() {
+function DiagnosticsSection({ status }: { status?: Status }) {
   const [result, setResult] = useSticky<Diagnostics | undefined>("diagnostics", undefined);
   const [running, setRunning] = useState(false);
+
+  // Invalidate sticky results when mode / provider / device context changes.
+  useEffect(() => {
+    if (!status || !result?.context) return;
+    const live = diagnosticsContextKey({
+      mode: status.mode,
+      provider: status.provider,
+      active_provider: status.active_provider,
+      device: status.device,
+    });
+    const stored = diagnosticsContextKey(result.context);
+    if (live !== stored) setResult(undefined);
+  }, [status?.mode, status?.provider, status?.active_provider, status?.device, result, setResult]);
 
   const run = async () => {
     setRunning(true);
@@ -161,6 +193,18 @@ function DiagnosticsSection() {
           </PanelSectionRow>
           <PanelSectionRow>
             <Field
+              label="Context"
+              description={[
+                result.resolver,
+                result.mode,
+                result.active_provider || result.provider,
+              ].filter(Boolean).join(" · ")}
+              focusable
+              highlightOnFocus
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <Field
               label="Network DNS"
               description={result.network_dns.join(", ") || "None from DHCP"}
               focusable
@@ -175,7 +219,7 @@ function DiagnosticsSection() {
               focusable
               highlightOnFocus
             >
-              <DiagnosticsTable rows={result.rows} />
+              <DiagnosticsTable rows={result.rows} resolver={result.resolver} />
             </Field>
           </PanelSectionRow>
         </>
@@ -290,7 +334,7 @@ function Content() {
           </>
         )}
       </PanelSection>
-      <DiagnosticsSection />
+      <DiagnosticsSection status={status} />
     </>
   );
 };

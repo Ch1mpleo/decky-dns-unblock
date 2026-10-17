@@ -26,13 +26,44 @@ export type Status = {
 
 export const PROXY_ADDR = "127.0.0.2";
 
-export type Verdict = { verdict: "ok" | "blocked" | "unknown"; detail: string };
+export type DnsVerdict =
+  | "resolved"
+  | "lookup_failed"
+  | "possible_dns_blocking"
+  | "unknown"
+  | "ok"
+  | "blocked";
+
+export type HttpsVerdict = "reachable" | "http_error" | "connection_failed" | "unknown";
+
+export type DnsCell = { verdict: DnsVerdict; detail: string; addresses?: string[] };
+export type HttpsCell = { verdict: HttpsVerdict; detail: string; status_code?: number | null };
+
+export type DiagnosticsContext = {
+  mode: Mode | string;
+  provider: string;
+  active_provider: string | null;
+  device: string | null;
+};
 
 export type Diagnostics = {
+  timestamp: number;
+  mode: Mode | string;
+  provider: string;
+  active_provider: string | null;
+  connectivity: string;
   device: string | null;
   network_dns: string[];
-  rows: { domain: string; network: Verdict; doh: Verdict; system: Verdict }[];
+  resolver: string;
+  rows: {
+    domain: string;
+    network: DnsCell;
+    provider: DnsCell;
+    system: DnsCell;
+    https: HttpsCell;
+  }[];
   summary: string;
+  context: DiagnosticsContext;
 };
 
 export const getStatus = callable<[], Status>("get_status");
@@ -96,5 +127,13 @@ export const statusLabel = (status: Status) => {
   }
   return STATE_LABELS[status.state] ?? status.state;
 };
+
+/** Fingerprint used to invalidate sticky diagnostics when selection/network context changes. */
+export const diagnosticsContextKey = (ctx: {
+  mode?: string | null;
+  provider?: string | null;
+  active_provider?: string | null;
+  device?: string | null;
+}) => `${ctx.mode ?? ""}|${ctx.provider ?? ""}|${ctx.active_provider ?? ""}|${ctx.device ?? ""}`;
 
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));

@@ -33,6 +33,8 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Type check
+        run: pnpm exec tsc --noEmit --skipLibCheck
       - run: pnpm run build
 
       - name: Fetch pinned dnsproxy

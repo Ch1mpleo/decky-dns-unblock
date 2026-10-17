@@ -135,21 +135,164 @@ class Plugin:
         return await self._emit_status()
 
     async def run_diagnostics(self) -> dict:
+        """Explicit diagnostics: Network vs configured/active provider vs Deck, plus HTTPS."""
+        gen = self.generation
         device = self.device
         network_dns: list[str] = []
+        connectivity = "unknown"
         try:
             device = device or await nm.get_active_wifi_device()
+            connectivity = await nm.get_connectivity() if device else "none"
             if device:
                 network_dns = await nm.get_dhcp_dns(device)
         except nm.CommandError as e:
             decky.logger.warning("Diagnostics: network lookup failed: %s", e)
-        rows = await health.diagnose(network_dns)
-        summary = health.summarize(rows)
-        decky.logger.info("Diagnostics on %s (network DNS %s, state %s, dnsproxy %s): %s -> %s",
-                          device, network_dns, self.state, self.proxy.running,
-                          [(r["domain"], r["network"]["verdict"], r["doh"]["verdict"], r["system"]["verdict"])
-                           for r in rows], summary)
-        return {"device": device, "network_dns": network_dns, "rows": rows, "summary": summary}
+
+        if not self._generation_ok(gen, "diagnostics before provider probe"):
+            return self._diagnostics_stale_payload(device, network_dns, connectivity)
+
+        server, port, resolver_label, probe = await self._diagnostics_provider_endpoint()
+        try:
+            if not self._generation_ok(gen, "diagnostics before diagnose"):
+                return self._diagnostics_stale_payload(device, network_dns, connectivity)
+            rows = await health.diagnose(network_dns, server, provider_port=port)
+            summary = health.summarize(rows, resolver_label=resolver_label)
+        finally:
+            if probe is not None:
+                await probe.stop()
+
+        if not self._generation_ok(gen, "diagnostics before return"):
+            return self._diagnostics_stale_payload(device, network_dns, connectivity)
+
+        payload = {
+            "timestamp": time.time(),
+            "mode": self.settings.mode,
+            "provider": self.settings.provider,
+            "active_provider": self.active_provider,
+            "connectivity": connectivity,
+            "device": device,
+            "network_dns": network_dns,
+            "resolver": resolver_label,
+            "rows": rows,
+            "summary": summary,
+            "context": {
+                "mode": self.settings.mode,
+                "provider": self.settings.provider,
+                "active_provider": self.active_provider,
+                "device": device,
+            },
+        }
+        decky.logger.info(
+            "Diagnostics on %s (resolver %s, network DNS %s, state %s): %s -> %s",
+            device, resolver_label, network_dns, self.state,
+            [(r["domain"], r["network"]["verdict"], r["provider"]["verdict"],
+              r["system"]["verdict"], r["https"]["verdict"]) for r in rows],
+            summary,
+        )
+        return payload
+
+    def _diagnostics_stale_payload(self, device, network_dns, connectivity) -> dict:
+        return {
+            "timestamp": time.time(),
+            "mode": self.settings.mode,
+            "provider": self.settings.provider,
+            "active_provider": self.active_provider,
+            "connectivity": connectivity,
+            "device": device,
+            "network_dns": network_dns,
+            "resolver": "stale",
+            "rows": [],
+            "summary": "Diagnostics cancelled (network or settings changed).",
+            "context": {
+                "mode": self.settings.mode,
+                "provider": self.settings.provider,
+                "active_provider": self.active_provider,
+                "device": device,
+            },
+        }
+
+    async def _diagnostics_provider_endpoint(
+        self,
+    ) -> tuple[str | None, int, str, ProbeProxy | None]:
+        """Pick the provider column target without changing the live link DNS.
+
+        Prefers the active resolver; otherwise probes the configured preference (Automatic may
+        try encrypted candidates via a temporary dnsproxy).
+        """
+        # Live encrypted path already on the link.
+        if (
+            self.active_provider
+            and self.observed_transport == providers.ENCRYPTED
+            and self.proxy.running
+        ):
+            label = f"{select.provider_display_name(self.active_provider)} encrypted (live)"
+            return LISTEN_ADDR, 53, label, None
+
+        # Live plain path.
+        if self.active_provider and self.observed_transport == providers.PLAIN:
+            candidates = providers.candidate_order("plain", self.active_provider, self.settings.custom_servers)
+            if candidates:
+                server = (list(candidates[0].v4) or list(candidates[0].v6) or [None])[0]
+                if server:
+                    label = f"{select.provider_display_name(self.active_provider)} plain"
+                    return server, 53, label, None
+
+        preference = self.settings.provider
+        # Configured Automatic while inactive: try encrypted candidates without applying.
+        if preference == providers.AUTOMATIC:
+            if not self.proxy.available:
+                return None, 53, "Automatic (dnsproxy missing)", None
+            for candidate in providers.candidate_order("encrypted", providers.AUTOMATIC):
+                probe = ProbeProxy(
+                    self.proxy.binary,
+                    os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "dnsproxy-probe.log"),
+                    decky.logger,
+                )
+                try:
+                    port = await probe.start(list(candidate.doh))
+                    ok, _ = await health.verify(
+                        LISTEN_ADDR, timeout=health.DNS_TIMEOUT, attempts=2, port=port
+                    )
+                    if ok:
+                        label = f"{select.provider_display_name(candidate.provider_id)} encrypted (probe)"
+                        return LISTEN_ADDR, port, label, probe
+                except OSError:
+                    pass
+                await probe.stop()
+            # Fall through to first plain Automatic candidate.
+            plains = providers.candidate_order("plain", providers.AUTOMATIC)
+            if plains:
+                server = (list(plains[0].v4) or [None])[0]
+                label = f"{select.provider_display_name(plains[0].provider_id)} plain (probe)"
+                return server, 53, label, None
+            return None, 53, "Automatic (no candidate)", None
+
+        if preference == providers.CUSTOM:
+            try:
+                v4, v6 = providers.plain_servers(preference, self.settings.custom_servers)
+            except ValueError:
+                return None, 53, "Custom (invalid)", None
+            server = (v4 or v6 or [None])[0]
+            return server, 53, "Custom plain", None
+
+        # Explicit preset: prefer encrypted probe for parity with selection.
+        doh = providers.doh_upstreams(preference)
+        if doh and self.proxy.available:
+            probe = ProbeProxy(
+                self.proxy.binary,
+                os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "dnsproxy-probe.log"),
+                decky.logger,
+            )
+            try:
+                port = await probe.start(doh)
+                label = f"{select.provider_display_name(preference)} encrypted (probe)"
+                return LISTEN_ADDR, port, label, probe
+            except OSError as e:
+                await probe.stop()
+                decky.logger.warning("Diagnostics probe failed: %s", e)
+        v4, v6 = providers.plain_servers(preference, self.settings.custom_servers)
+        server = (v4 or v6 or [None])[0]
+        return server, 53, f"{select.provider_display_name(preference)} plain", None
 
     # --- events (NetworkManager, dnsproxy) ---
 
