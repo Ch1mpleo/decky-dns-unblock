@@ -22,6 +22,10 @@ PROXY_FAILURE_LIMIT = 3
 RESTORE_RETRY_DELAYS = (0.0, 1.0, 3.0)
 # Degraded (fallback/error) re-try schedule: 30s, 2m, then every 5m.
 DEGRADED_RETRY_DELAYS = (30.0, 120.0, 300.0)
+# Panel-open health refresh: reuse results younger than this.
+HEALTH_CACHE_SECONDS = 60.0
+# Require two failed checks this far apart before replacing an established provider.
+HYSTERESIS_SECONDS = 1.0
 
 
 class Plugin:
@@ -60,6 +64,9 @@ class Plugin:
         self.observed_transport: str | None = None
         self.verification: str | None = None
         self.verification_at: float | None = None
+        # Bumped on network/settings/shutdown so in-flight probes discard stale results.
+        self.generation = 0
+        self._health_refreshing = False
         decky.logger.info("DNS Unblock starting (Python %s), settings %s",
                           sys.version.split()[0], self.settings.to_dict())
         if not self.proxy.available:
@@ -90,6 +97,8 @@ class Plugin:
             decky.logger.info("resolved switched to %s, moving it back to dnsproxy", status["current_dns"])
             self.force_link = True
             self._spawn_reconcile()
+        elif self._health_cache_stale() and not self.lock.locked() and not self._health_refreshing:
+            self._spawn_health_refresh()
         return status
 
     async def set_enabled(self, enabled: bool) -> dict:
@@ -99,6 +108,7 @@ class Plugin:
             self.proxy_failures = 0
             self._reset_degraded_retry()
             self._clear_selection()
+            self._bump_generation("settings")
             await self._reconcile()
         return await self._emit_status()
 
@@ -109,6 +119,7 @@ class Plugin:
             self.proxy_failures = 0
             self._reset_degraded_retry()
             self._clear_selection()
+            self._bump_generation("settings")
             await self._reconcile()
         return await self._emit_status()
 
@@ -119,6 +130,7 @@ class Plugin:
             self.proxy_failures = 0
             self._reset_degraded_retry()
             self._clear_selection()
+            self._bump_generation("settings")
             await self._reconcile()
         return await self._emit_status()
 
@@ -149,10 +161,12 @@ class Plugin:
             self._reset_degraded_retry()
             # New connection: re-select rather than keep a sticky provider from the previous network.
             self._clear_selection()
+            self._bump_generation("device_up")
         elif event.kind == DEVICE_DOWN:
             self.connected_at.pop(event.value, None)
             self.proxy_stale = True
             self._cancel_degraded_retry()
+            self._bump_generation("device_down")
             # Do not clear the marker here: reconcile confirms the device is gone, then FORGET.
             # Clearing early could drop recovery evidence if restore is still owed.
         if self.debounce_timer:
@@ -179,6 +193,7 @@ class Plugin:
 
     async def _shutdown(self) -> None:
         self.stopping = True
+        self._bump_generation("shutdown")
         self._cancel_degraded_retry()
         for timer in (self.debounce_timer, self.settle_timer):
             if timer:
@@ -268,6 +283,7 @@ class Plugin:
 
     async def _apply(self, device: str) -> None:
         """Evaluate candidates (DNS + HTTPS); apply the first fully verified, else a DNS-only backup."""
+        gen = self.generation
         candidates = select.sticky_first(
             providers.candidate_order(
                 self.settings.mode, self.settings.provider, self.settings.custom_servers
@@ -285,9 +301,25 @@ class Plugin:
         elif not encrypted_ok and self.settings.mode != state.PLAIN:
             notes.append(self._encrypted_unavailable_reason())
 
+        # Established provider: require two failures before replacing (hysteresis).
+        if await self._keep_established_with_hysteresis(device, candidates, gen, notes):
+            return
+        if not self._generation_ok(gen, "apply after hysteresis"):
+            return
+
         dns_only_backup: tuple[providers.Candidate, list[str], list[str], str] | None = None
+        skip_sticky = (
+            self.active_provider is not None
+            and self.verification in (select.VERIFIED, select.DNS_ONLY)
+        )
 
         for candidate in candidates:
+            if skip_sticky and (
+                candidate.provider_id == self.active_provider
+                and candidate.transport == self.observed_transport
+            ):
+                # Already failed hysteresis for this candidate; try the rest.
+                continue
             if candidate.transport == providers.ENCRYPTED and not encrypted_ok:
                 continue
             label = providers.candidate_label(candidate)
@@ -297,6 +329,8 @@ class Plugin:
                 else:
                     outcome, detail, v4, v6 = await self._evaluate_plain(candidate)
             except nm.CommandError as e:
+                if not self._generation_ok(gen, "apply error"):
+                    return
                 decky.logger.error("Applying DNS on %s failed: %s", device, e)
                 restored = await self._restore(device)
                 if restored:
@@ -306,8 +340,11 @@ class Plugin:
                 self._schedule_degraded_retry()
                 return
 
+            if not self._generation_ok(gen, f"after evaluating {label}"):
+                return
+
             if outcome == select.VERIFIED:
-                await self._commit_candidate(device, candidate, v4, v6, select.VERIFIED, notes)
+                await self._commit_candidate(device, candidate, v4, v6, select.VERIFIED, notes, gen=gen)
                 return
             if outcome == select.DNS_ONLY and dns_only_backup is None:
                 dns_only_backup = (candidate, v4, v6, detail)
@@ -317,10 +354,14 @@ class Plugin:
             decky.logger.warning("%s check failed on %s: %s", label, device, detail)
             notes.append(f"{label} failed ({detail})")
 
+        if not self._generation_ok(gen, "apply before dns_only/fallback"):
+            return
+
         if dns_only_backup:
             candidate, v4, v6, _detail = dns_only_backup
             await self._commit_candidate(
-                device, candidate, v4, v6, select.DNS_ONLY, notes, message=select.DNS_ONLY_MESSAGE
+                device, candidate, v4, v6, select.DNS_ONLY, notes,
+                message=select.DNS_ONLY_MESSAGE, gen=gen,
             )
             return
 
@@ -396,7 +437,10 @@ class Plugin:
         verification: str,
         notes: list[str],
         message: str = "",
-    ) -> None:
+        gen: int | None = None,
+    ) -> bool:
+        if gen is not None and not self._generation_ok(gen, "before commit"):
+            return False
         if candidate.transport == providers.ENCRYPTED:
             if self.proxy_stale:
                 await self.proxy.stop()
@@ -412,7 +456,12 @@ class Plugin:
             await self.proxy.stop()
             await self._set_link(device, v4, v6)
 
+        if gen is not None and not self._generation_ok(gen, "after set_link"):
+            return False
+
         system_ok, system_detail = await self._confirm_system()
+        if gen is not None and not self._generation_ok(gen, "after system confirm"):
+            return False
         if verification == select.VERIFIED and not system_ok:
             decky.logger.warning("System DNS recheck failed after apply: %s", system_detail)
             verification = select.DNS_ONLY
@@ -425,6 +474,7 @@ class Plugin:
         note = message or "; ".join(notes)
         self._set_state(state.ACTIVE_STATES[candidate.transport], note)
         self._reset_degraded_retry()
+        return True
 
     async def _confirm_system(self) -> tuple[bool, str]:
         """Flush resolver cache and re-check via systemd-resolved before claiming verified."""
@@ -496,6 +546,137 @@ class Plugin:
         self.observed_transport = None
         self.verification = None
         self.verification_at = None
+
+    def _bump_generation(self, reason: str) -> None:
+        self.generation += 1
+        decky.logger.info("Generation %s (%s)", self.generation, reason)
+
+    def _generation_ok(self, gen: int, where: str) -> bool:
+        if self.stopping or gen != self.generation:
+            decky.logger.info("Discarding stale work at %s (gen %s, now %s)", where, gen, self.generation)
+            return False
+        return True
+
+    def _health_cache_stale(self) -> bool:
+        if self.state not in (state.ACTIVE_ENCRYPTED, state.ACTIVE_PLAIN):
+            return False
+        if self.verification_at is None:
+            return True
+        return (time.time() - self.verification_at) >= HEALTH_CACHE_SECONDS
+
+    def _spawn_health_refresh(self) -> None:
+        self._health_refreshing = True
+        task = asyncio.create_task(self._health_refresh_and_emit())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def _health_refresh_and_emit(self) -> None:
+        try:
+            async with self.lock:
+                await self._refresh_established_health()
+            await self._emit_status()
+        except Exception:
+            decky.logger.exception("Health refresh failed")
+        finally:
+            self._health_refreshing = False
+
+    async def _refresh_established_health(self) -> None:
+        """Panel-open path: re-check the sticky provider with hysteresis; full reselect only after two failures."""
+        if self.state not in (state.ACTIVE_ENCRYPTED, state.ACTIVE_PLAIN):
+            return
+        if not self.active_provider or not self.device:
+            return
+        if not self._health_cache_stale():
+            return
+        gen = self.generation
+        candidates = select.sticky_first(
+            providers.candidate_order(
+                self.settings.mode, self.settings.provider, self.settings.custom_servers
+            ),
+            self.active_provider,
+            self.observed_transport,
+        )
+        notes: list[str] = []
+        if await self._keep_established_with_hysteresis(self.device, candidates, gen, notes):
+            return
+        if self._generation_ok(gen, "health refresh → reselect"):
+            await self._apply(self.device)
+
+    async def _keep_established_with_hysteresis(
+        self,
+        device: str,
+        candidates: list[providers.Candidate],
+        gen: int,
+        notes: list[str],
+    ) -> bool:
+        """If a working provider is established, keep it unless two checks ~1s apart both fail."""
+        if not self.active_provider or self.verification not in (select.VERIFIED, select.DNS_ONLY):
+            return False
+        if self.device is not None and self.device != device:
+            return False
+        sticky = next(
+            (
+                c for c in candidates
+                if c.provider_id == self.active_provider and c.transport == self.observed_transport
+            ),
+            None,
+        )
+        if sticky is None:
+            return False
+
+        async def one_check() -> tuple[str, str, list[str], list[str]]:
+            if sticky.transport == providers.ENCRYPTED:
+                return await self._evaluate_encrypted(sticky)
+            return await self._evaluate_plain(sticky)
+
+        first = await one_check()
+        if not self._generation_ok(gen, "hysteresis first check"):
+            return True  # abort apply; stale
+        outcome, detail, v4, v6 = first
+        if outcome in (select.VERIFIED, select.DNS_ONLY):
+            # Still good: refresh timestamp; re-commit only if link needs repair.
+            same = (
+                self.active_provider == sticky.provider_id
+                and self.observed_transport == sticky.transport
+                and self.device == device
+            )
+            if same and not self.force_link and not self.proxy_stale:
+                self.verification = outcome
+                self.verification_at = time.time()
+                decky.logger.info("Established %s still healthy", providers.candidate_label(sticky))
+                return True
+            await self._commit_candidate(
+                device, sticky, v4, v6, outcome, notes,
+                message=select.DNS_ONLY_MESSAGE if outcome == select.DNS_ONLY else "",
+                gen=gen,
+            )
+            return True
+
+        decky.logger.warning(
+            "Established %s failed once (%s); rechecking in %ss",
+            providers.candidate_label(sticky), detail, HYSTERESIS_SECONDS,
+        )
+        await asyncio.sleep(HYSTERESIS_SECONDS)
+        if not self._generation_ok(gen, "hysteresis gap"):
+            return True
+
+        second = await one_check()
+        if not self._generation_ok(gen, "hysteresis second check"):
+            return True
+        outcome, detail, v4, v6 = second
+        if outcome in (select.VERIFIED, select.DNS_ONLY):
+            await self._commit_candidate(
+                device, sticky, v4, v6, outcome, notes,
+                message=select.DNS_ONLY_MESSAGE if outcome == select.DNS_ONLY else "",
+                gen=gen,
+            )
+            return True
+
+        decky.logger.warning(
+            "Established %s failed twice; allowing provider replacement (%s)",
+            providers.candidate_label(sticky), detail,
+        )
+        return False
 
     def _cancel_degraded_retry(self) -> None:
         if self.retry_timer:

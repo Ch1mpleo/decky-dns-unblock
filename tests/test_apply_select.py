@@ -44,6 +44,8 @@ def _plugin():
     p.state = "off"
     p.message = ""
     p.stopping = False
+    p.generation = 0
+    p._health_refreshing = False
     p.retry_timer = None
     p.retry_index = 0
     p._set_link = AsyncMock()
@@ -52,6 +54,7 @@ def _plugin():
     p._schedule_degraded_retry = MagicMock()
     p._clear_selection = lambda: plugin_main.Plugin._clear_selection(p)
     p._set_state = lambda s, m="": plugin_main.Plugin._set_state(p, s, m)
+    p._keep_established_with_hysteresis = AsyncMock(return_value=False)
     return p
 
 
