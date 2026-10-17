@@ -54,6 +54,7 @@ export const MODE_OPTIONS: { data: Mode; label: string }[] = [
 ];
 
 export const PROVIDER_OPTIONS = [
+  { data: "automatic", label: "Automatic (recommended)" },
   { data: "cloudflare", label: "Cloudflare" },
   { data: "google", label: "Google" },
   { data: "quad9", label: "Quad9" },

@@ -3,6 +3,15 @@
 import ipaddress
 from dataclasses import dataclass
 
+# Transport kinds used by Candidate (same strings as state.ENCRYPTED / state.PLAIN).
+ENCRYPTED = "encrypted"
+PLAIN = "plain"
+
+AUTOMATIC = "automatic"
+CUSTOM = "custom"
+# Order for Automatic provider selection (and docs).
+PRESET_ORDER = ("cloudflare", "google", "quad9")
+
 
 @dataclass(frozen=True)
 class Provider:
@@ -10,6 +19,17 @@ class Provider:
     v4: tuple[str, ...]
     v6: tuple[str, ...]
     doh: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One apply/evaluation attempt: a concrete provider + transport with its servers."""
+
+    provider_id: str
+    transport: str
+    doh: tuple[str, ...] = ()
+    v4: tuple[str, ...] = ()
+    v6: tuple[str, ...] = ()
 
 
 PROVIDERS: dict[str, Provider] = {
@@ -32,7 +52,6 @@ PROVIDERS: dict[str, Provider] = {
         ("https://9.9.9.9/dns-query", "https://149.112.112.112/dns-query"),
     ),
 }
-CUSTOM = "custom"
 
 
 def split_servers(servers: list[str]) -> tuple[list[str], list[str]]:
@@ -54,7 +73,22 @@ def split_servers(servers: list[str]) -> tuple[list[str], list[str]]:
     return v4, v6
 
 
+def is_valid_provider(provider: str, custom_servers: list[str] | None = None) -> bool:
+    """True if `provider` is a known preference (including Automatic / valid Custom)."""
+    if provider == AUTOMATIC or provider in PROVIDERS:
+        return True
+    if provider == CUSTOM:
+        try:
+            split_servers(custom_servers or [])
+            return True
+        except ValueError:
+            return False
+    return False
+
+
 def plain_servers(provider: str, custom_servers: list[str]) -> tuple[list[str], list[str]]:
+    if provider == AUTOMATIC:
+        raise ValueError("automatic has no fixed plain servers; use candidate_order")
     if provider == CUSTOM:
         return split_servers(custom_servers)
     preset = PROVIDERS[provider]
@@ -62,6 +96,65 @@ def plain_servers(provider: str, custom_servers: list[str]) -> tuple[list[str], 
 
 
 def doh_upstreams(provider: str) -> list[str]:
-    """DoH URLs for dnsproxy; custom servers are plain DNS only, so they have none."""
+    """DoH URLs for dnsproxy; Automatic/Custom have none as a fixed set (use candidate_order)."""
     preset = PROVIDERS.get(provider)
     return list(preset.doh) if preset else []
+
+
+def _encrypted_candidate(provider_id: str) -> Candidate:
+    preset = PROVIDERS[provider_id]
+    return Candidate(provider_id, ENCRYPTED, doh=preset.doh, v4=preset.v4, v6=preset.v6)
+
+
+def _plain_candidate(provider_id: str, custom_servers: list[str] | None = None) -> Candidate:
+    if provider_id == CUSTOM:
+        v4, v6 = split_servers(custom_servers or [])
+        return Candidate(CUSTOM, PLAIN, v4=tuple(v4), v6=tuple(v6))
+    preset = PROVIDERS[provider_id]
+    return Candidate(provider_id, PLAIN, v4=preset.v4, v6=preset.v6)
+
+
+def candidate_order(mode: str, provider: str, custom_servers: list[str] | None = None) -> list[Candidate]:
+    """Candidates to try, in order. Provider Automatic ≠ Mode Auto.
+
+    - Automatic + Auto mode: encrypted CF→Google→Quad9, then plain CF→Google→Quad9.
+    - Automatic + Encrypted: encrypted trio only.
+    - Automatic + Plain: plain trio only.
+    - Explicit preset: that provider's encrypted and/or plain steps per mode (never another brand).
+    - Custom: plain only (empty list in Encrypted-only mode).
+    """
+    custom_servers = custom_servers or []
+    want_encrypted = mode in ("auto", ENCRYPTED)
+    want_plain = mode in ("auto", PLAIN)
+
+    if provider == AUTOMATIC:
+        out: list[Candidate] = []
+        if want_encrypted:
+            out.extend(_encrypted_candidate(pid) for pid in PRESET_ORDER)
+        if want_plain:
+            out.extend(_plain_candidate(pid) for pid in PRESET_ORDER)
+        return out
+
+    if provider == CUSTOM:
+        return [_plain_candidate(CUSTOM, custom_servers)] if want_plain else []
+
+    if provider not in PROVIDERS:
+        raise ValueError(f"Unknown provider: {provider!r}")
+
+    out = []
+    if want_encrypted:
+        out.append(_encrypted_candidate(provider))
+    if want_plain:
+        out.append(_plain_candidate(provider))
+    return out
+
+
+def candidate_label(candidate: Candidate) -> str:
+    if candidate.provider_id == CUSTOM:
+        name = "Custom"
+    elif candidate.provider_id in PROVIDERS:
+        name = PROVIDERS[candidate.provider_id].label
+    else:
+        name = candidate.provider_id
+    kind = "Encrypted" if candidate.transport == ENCRYPTED else "Plain"
+    return f"{name} {kind}"

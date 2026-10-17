@@ -36,8 +36,8 @@ The plugin runs as root: it changes network settings and runs a local DNS server
 | Control | What it does |
 |---|---|
 | Bypass Steam block | Master switch. |
-| Mode | **Auto** (default): encrypted DNS, plain DNS if that fails, network DNS if both fail. **Encrypted only**: never sends DNS unencrypted; falls back to network DNS instead of plain. **Plain only**: public DNS without dnsproxy. |
-| Provider | Cloudflare (default), Google, Quad9, or Custom. Custom servers are plain DNS only (no encrypted DNS). |
+| Mode | **Auto** (default): encrypted DNS, plain DNS if that fails, network DNS if both fail. **Encrypted only**: never sends DNS unencrypted; falls back to network DNS instead of plain. **Plain only**: public DNS without dnsproxy. Mode Auto is transport fallback, not provider picking. |
+| Provider | **Automatic** (default on new installs): try Cloudflare, Google, then Quad9. Or pick Cloudflare, Google, Quad9, or Custom. Custom servers are plain DNS only (no encrypted DNS). Existing installs keep their saved provider. |
 | Run diagnostics | Checks Steam's domains and explains what's blocked (see below). |
 
 ### Status

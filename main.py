@@ -224,21 +224,30 @@ class Plugin:
             self.settle_timer = self.loop.call_later(remaining, self._spawn_reconcile)
 
     async def _apply(self, device: str) -> None:
-        """Try encrypted and/or plain DNS (per mode), verifying each before touching the device.
+        """Try candidates from provider+mode order, verifying each before touching the device.
         If nothing works, give the device back the network's own DNS."""
-        doh = providers.doh_upstreams(self.settings.provider)
-        encrypted_ok = self.proxy.available and bool(doh) and self.proxy_failures < PROXY_FAILURE_LIMIT
-        steps = state.attempts(self.settings.mode, encrypted_ok)
+        candidates = providers.candidate_order(
+            self.settings.mode, self.settings.provider, self.settings.custom_servers
+        )
+        encrypted = [c for c in candidates if c.transport == providers.ENCRYPTED]
+        encrypted_ok = (
+            self.proxy.available and bool(encrypted) and self.proxy_failures < PROXY_FAILURE_LIMIT
+        )
         notes: list[str] = []
-        if not encrypted_ok and self.settings.mode != state.PLAIN:
-            notes.append(self._encrypted_unavailable_reason(doh))
+        if self.settings.mode != state.PLAIN and not encrypted:
+            notes.append("Custom servers have no encrypted DNS")
+        elif not encrypted_ok and self.settings.mode != state.PLAIN:
+            notes.append(self._encrypted_unavailable_reason())
 
-        for step in steps:
+        for candidate in candidates:
+            if candidate.transport == providers.ENCRYPTED and not encrypted_ok:
+                continue
+            label = providers.candidate_label(candidate)
             try:
-                if step == state.ENCRYPTED:
-                    ok, detail = await self._try_encrypted(device, doh)
+                if candidate.transport == providers.ENCRYPTED:
+                    ok, detail = await self._try_encrypted(device, candidate)
                 else:
-                    ok, detail = await self._try_plain(device)
+                    ok, detail = await self._try_plain(device, candidate)
             except nm.CommandError as e:
                 decky.logger.error("Applying DNS on %s failed: %s", device, e)
                 await self.proxy.stop()
@@ -246,44 +255,41 @@ class Plugin:
                 self._set_state(state.ERROR, str(e))
                 return
             if ok:
-                self._set_state(state.ACTIVE_STATES[step], "; ".join(notes))
+                self._set_state(state.ACTIVE_STATES[candidate.transport], "; ".join(notes))
                 return
-            decky.logger.warning("%s DNS check failed on %s: %s", step.capitalize(), device, detail)
-            notes.append(f"{step.capitalize()} DNS failed ({detail})")
+            decky.logger.warning("%s check failed on %s: %s", label, device, detail)
+            notes.append(f"{label} failed ({detail})")
 
         await self.proxy.stop()
         if self.device:
             await self._restore(self.device)
         self._set_state(state.FALLBACK, "; ".join(notes) or "No usable DNS")
 
-    def _encrypted_unavailable_reason(self, doh: list[str]) -> str:
-        if not doh:
-            return "Custom servers have no encrypted DNS"
+    def _encrypted_unavailable_reason(self) -> str:
         if not self.proxy.available:
             return "dnsproxy is missing"
         return "dnsproxy keeps crashing"
 
-    async def _try_encrypted(self, device: str, doh: list[str]) -> tuple[bool, str]:
+    async def _try_encrypted(self, device: str, candidate: providers.Candidate) -> tuple[bool, str]:
         if self.proxy_stale:
             await self.proxy.stop()
             self.proxy_stale = False
         try:
-            started = await self.proxy.start(doh)
+            started = await self.proxy.start(list(candidate.doh))
         except OSError as e:
             return False, f"dnsproxy: {e}"
         ok, detail = await health.verify(LISTEN_ADDR, timeout=4.0, attempts=5)
         if not ok:
             await self.proxy.stop()
             return False, detail
-        v4, _ = providers.plain_servers(self.settings.provider, self.settings.custom_servers)
         # Auto keeps a plain server second so resolved still has DNS if dnsproxy dies.
-        link = [LISTEN_ADDR] + (v4[:1] if self.settings.mode == "auto" else [])
+        link = [LISTEN_ADDR] + (list(candidate.v4[:1]) if self.settings.mode == "auto" else [])
         await self._set_link(device, link, [], force=started or self.force_link)
         self.force_link = False
         return True, detail
 
-    async def _try_plain(self, device: str) -> tuple[bool, str]:
-        v4, v6 = providers.plain_servers(self.settings.provider, self.settings.custom_servers)
+    async def _try_plain(self, device: str, candidate: providers.Candidate) -> tuple[bool, str]:
+        v4, v6 = list(candidate.v4), list(candidate.v6)
         ok, detail = await health.verify((v4 or v6)[0], timeout=3.0)
         if not ok:
             return False, detail

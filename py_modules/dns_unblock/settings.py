@@ -9,7 +9,7 @@ MODES = ("auto", "encrypted", "plain")
 DEFAULTS = {
     "enabled": False,
     "mode": "auto",
-    "provider": "cloudflare",
+    "provider": providers.AUTOMATIC,
     "custom_servers": [],
 }
 
@@ -24,7 +24,12 @@ class Settings:
         self.load()
 
     def load(self) -> None:
-        """Load from disk; unknown keys and invalid values fall back to defaults."""
+        """Load from disk; unknown keys and invalid values fall back to defaults.
+
+        Existing installs keep their saved provider (including cloudflare). Only a missing
+        file or invalid provider gets the current default (Automatic). Saved cloudflare is
+        never remapped to automatic — 0.1.0 cannot tell an explicit pick from the old default.
+        """
         try:
             with open(self.path, encoding="utf-8") as f:
                 raw = json.load(f)
@@ -40,15 +45,8 @@ class Settings:
         if isinstance(servers, list) and all(isinstance(s, str) for s in servers):
             self.custom_servers = servers
         provider = raw.get("provider")
-        if provider in providers.PROVIDERS or (provider == providers.CUSTOM and self._custom_valid()):
+        if isinstance(provider, str) and providers.is_valid_provider(provider, self.custom_servers):
             self.provider = provider
-
-    def _custom_valid(self) -> bool:
-        try:
-            providers.split_servers(self.custom_servers)
-            return True
-        except ValueError:
-            return False
 
     def set_mode(self, mode: str) -> None:
         if mode not in MODES:
@@ -56,6 +54,9 @@ class Settings:
         self.mode = mode
 
     def set_provider(self, provider: str, custom_servers: list[str] | None = None) -> None:
+        if provider == providers.AUTOMATIC:
+            self.provider = provider
+            return
         if provider == providers.CUSTOM:
             servers = [s.strip() for s in (custom_servers or []) if s.strip()]
             providers.split_servers(servers)
