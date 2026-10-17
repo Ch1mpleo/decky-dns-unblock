@@ -4,12 +4,16 @@ Run with a build that includes Automatic selection and DNS+HTTPS verification
 (deployed plugin or release zip). Default for new installs: **Mode Auto**,
 **Provider Automatic**.
 
-**RC status (2026-10-18):** Docs and `package.json` are at `0.2.0`. Local suite green
-(112 tests, `tsc`, build). Deck deploy/live matrix **not run** — `steamdeck.local`
-resolved to `192.168.1.11` but TCP/22 refused (sshd off or Deck asleep). Wake the Deck,
-`sudo systemctl enable --now sshd`, then `.\scripts\deploy.ps1` and fill the tables below.
-Do not tag `v0.2.0` until at least home Wi-Fi Automatic + Steam confirmation; do not
-claim FPT fixed without an affected-user Steam pass.
+**RC status (2026-10-18):** `0.2.0` deployed on Deck; local suite green. Home Wi‑Fi
+(DHCP `116.97.90.124/127`, sinkhole block) + Viettel‑style hotspot (`10.94.20.45`,
+NXDOMAIN) exercised with Provider **Automatic**:
+
+- Home: Cloudflare Encrypted verified; diagnostics Network block · Provider/Deck/HTTPS OK.
+- Hotspot: Cloudflare DNS OK but HTTPS timed out → Automatic selected **Google** Encrypted;
+  diagnostics NXDOMAIN · Provider OK · HTTPS OK · Deck OK; Steam reported working.
+- Switch home ↔ hotspot and sleep/wake re-applied cleanly (probe port 15353, then live `:53`).
+
+Do **not** claim FPT fixed without an affected-user Steam pass on an FPT link.
 
 For each network: open the panel, note Status (including active provider · transport),
 then **Run diagnostics**. Collect logs afterward:
